@@ -665,7 +665,7 @@ function renderLayerPanel() {
 
     const vis = document.createElement('button');
     vis.className = 'layer-vis-btn' + (l.visible ? '' : ' hidden-layer');
-    vis.title = l.visible ? 'Ocultar' : 'Mostrar';
+    vis.title = l.visible ? 'Hide layer' : 'Show layer';
     vis.innerHTML = l.visible
       ? `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`
       : `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>`;
@@ -729,8 +729,8 @@ function renderLayerPanel() {
     if (l.isVideo) {
       const linkBtn = document.createElement('button');
       linkBtn.className = 'layer-link-btn' + (l.videoOffline ? ' offline' : '');
-      linkBtn.title = l.videoOffline ? 'Reconectar vídeo offline (localizar arquivo)' : 'Alterar arquivo de vídeo';
-      linkBtn.innerHTML = l.videoOffline ? '⚠️ Reconectar' : '🔗 Link';
+      linkBtn.title = l.videoOffline ? 'Reconnect offline video (locate file)' : 'Change video file';
+      linkBtn.innerHTML = l.videoOffline ? '⚠️ Reconnect' : '🔗 Link';
       linkBtn.style.cssText = `
         background: none;
         border: none;
@@ -963,7 +963,7 @@ function renderTimeline() {
   const upBtn = document.createElement('button');
   upBtn.className = 'layer-icon-btn';
   upBtn.id = 'btn-timeline-layer-up';
-  upBtn.title = 'Mover camada acima';
+  upBtn.title = 'Move layer up';
   upBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="18 15 12 9 6 15" /></svg>`;
   upBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -973,7 +973,7 @@ function renderTimeline() {
   const downBtn = document.createElement('button');
   downBtn.className = 'layer-icon-btn';
   downBtn.id = 'btn-timeline-layer-down';
-  downBtn.title = 'Mover camada abaixo';
+  downBtn.title = 'Move layer down';
   downBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="6 9 12 15 18 9" /></svg>`;
   downBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -983,7 +983,7 @@ function renderTimeline() {
   const addBtn = document.createElement('button');
   addBtn.className = 'layer-icon-btn';
   addBtn.id = 'btn-timeline-add-layer';
-  addBtn.title = 'Nova camada de animação';
+  addBtn.title = 'New animation layer';
   addBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
   addBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -993,7 +993,7 @@ function renderTimeline() {
   const mergeBtn = document.createElement('button');
   mergeBtn.className = 'layer-icon-btn';
   mergeBtn.id = 'btn-timeline-merge-layer';
-  mergeBtn.title = 'Mesclar com a camada de baixo';
+  mergeBtn.title = 'Merge with layer below';
   mergeBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M12 5v14M19 12l-7 7-7-7" /><path d="M4 21h16" /></svg>`;
   mergeBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1003,7 +1003,7 @@ function renderTimeline() {
   const delBtn = document.createElement('button');
   delBtn.className = 'layer-icon-btn danger';
   delBtn.id = 'btn-timeline-del-layer';
-  delBtn.title = 'Excluir camada selecionada';
+  delBtn.title = 'Delete selected layer';
   delBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/></svg>`;
   delBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1013,7 +1013,7 @@ function renderTimeline() {
   const clearBtn = document.createElement('button');
   clearBtn.className = 'layer-icon-btn';
   clearBtn.id = 'btn-timeline-clear-layer';
-  clearBtn.title = 'Limpar o canvas da camada selecionada';
+  clearBtn.title = 'Clear selected layer canvas';
   clearBtn.innerHTML = `<span class="layer-clear-icon" aria-hidden="true"></span>`;
   clearBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1082,8 +1082,8 @@ function renderTimeline() {
     if (l.isVideo) {
       const linkBtn = document.createElement('button');
       linkBtn.className = 'layer-link-btn' + (l.videoOffline ? ' offline' : '');
-      linkBtn.title = l.videoOffline ? 'Reconectar vídeo offline (localizar arquivo)' : 'Alterar arquivo de vídeo';
-      linkBtn.innerHTML = l.videoOffline ? '⚠️ Reconectar' : '🔗 Link';
+      linkBtn.title = l.videoOffline ? 'Reconnect offline video (locate file)' : 'Change video file';
+      linkBtn.innerHTML = l.videoOffline ? '⚠️ Reconnect' : '🔗 Link';
       linkBtn.style.cssText = `
         background: none;
         border: none;
@@ -1233,7 +1233,7 @@ function play() {
   if (state.isPlaying) return;
   state.isPlaying = true;
   document.getElementById('btn-play').innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="1"/></svg>`;
-  document.getElementById('btn-play').title = 'Pausar animação';
+  document.getElementById('btn-play').title = 'Pause animation';
 
   // Play all active, visible video layers immediately
   layers.forEach(l => {
@@ -1269,7 +1269,7 @@ function pause() {
   clearInterval(playInterval);
   playInterval = null;
   document.getElementById('btn-play').innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
-  document.getElementById('btn-play').title = 'Iniciar animação';
+  document.getElementById('btn-play').title = 'Play animation';
 
   // Pause all video layers
   layers.forEach(l => {
@@ -4784,7 +4784,7 @@ document.getElementById('modal-create').addEventListener('click', () => {
   state.redoStack = [];
   window.currentProjectHandle = null; // new project — next save must ask for location
   window.currentProjectName = null;
-  document.title = "Illustra — Software de Ilustração";
+  document.title = 'Illustra — Illustration Software';
   initCanvas(w, h, bg);
   setBgColor(bg);
   document.getElementById('modal-overlay').classList.add('hidden');
