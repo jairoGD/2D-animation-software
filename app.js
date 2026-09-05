@@ -1010,11 +1010,22 @@ function renderTimeline() {
     deleteActiveLayer();
   });
 
+  const clearBtn = document.createElement('button');
+  clearBtn.className = 'layer-icon-btn';
+  clearBtn.id = 'btn-timeline-clear-layer';
+  clearBtn.title = 'Limpar o canvas da camada selecionada';
+  clearBtn.innerHTML = `<span class="layer-clear-icon" aria-hidden="true"></span>`;
+  clearBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    clearActiveCanvas();
+  });
+
   headerRow.appendChild(upBtn);
   headerRow.appendChild(downBtn);
   headerRow.appendChild(addBtn);
   headerRow.appendChild(mergeBtn);
   headerRow.appendChild(delBtn);
+  headerRow.appendChild(clearBtn);
   layersListContainer.appendChild(headerRow);
 
   // 1. Render Ruler Ticks
@@ -4289,6 +4300,132 @@ document.addEventListener('paste', (e) => {
   }
 });
 
+// ─── Image Import and Canvas File Drop ─────────────────────────
+const IMAGE_FILE_EXTENSIONS = /\.(?:avif|bmp|gif|jpe?g|png|svg|webp)$/i;
+const VIDEO_FILE_EXTENSIONS = /\.(?:avi|m4v|mkv|mov|mp4|mpeg|mpg|ogv|webm)$/i;
+
+function isImageFile(file) {
+  return !!file && (file.type.startsWith('image/') || IMAGE_FILE_EXTENSIONS.test(file.name));
+}
+
+function isVideoFile(file) {
+  return !!file && (file.type.startsWith('video/') || VIDEO_FILE_EXTENSIONS.test(file.name));
+}
+
+function importImageFile(file) {
+  if (!isImageFile(file)) return Promise.resolve(false);
+
+  return new Promise((resolve) => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+
+    img.onload = () => {
+      if (state.lassoActive) bakeLassoSelection();
+
+      const imageWidth = img.naturalWidth || img.width;
+      const imageHeight = img.naturalHeight || img.height;
+      const scale = Math.min(1, canvasW / imageWidth, canvasH / imageHeight);
+      const drawWidth = Math.max(1, Math.round(imageWidth * scale));
+      const drawHeight = Math.max(1, Math.round(imageHeight * scale));
+      const drawX = Math.floor((canvasW - drawWidth) / 2);
+      const drawY = Math.floor((canvasH - drawHeight) / 2);
+      const layerName = file.name.replace(/\.[^.]+$/, '').substring(0, 40) || 'Image';
+      const imageLayer = createLayerData(layerName);
+      const frame = imageLayer.frames[state.currentFrame];
+
+      frame.canvas = document.createElement('canvas');
+      frame.canvas.width = canvasW;
+      frame.canvas.height = canvasH;
+      frame.ctx = frame.canvas.getContext('2d');
+      frame.ctx.imageSmoothingEnabled = true;
+      frame.ctx.imageSmoothingQuality = 'high';
+      frame.ctx.drawImage(img, drawX, drawY, drawWidth, drawHeight);
+      frame.isKeyframe = true;
+      syncBackingCanvas(frame);
+
+      layers.splice(activeLayerIdx, 0, imageLayer);
+      renderLayerPanel();
+      renderTimeline();
+      compositeAll();
+      saveHistory();
+      showToast(`🖼️ ${file.name} imported!`);
+      URL.revokeObjectURL(objectUrl);
+      resolve(true);
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      showToast(`⚠️ Could not import ${file.name}`);
+      resolve(false);
+    };
+
+    img.src = objectUrl;
+  });
+}
+
+window.importImageFile = importImageFile;
+
+const imageFileInput = document.getElementById('image-input');
+document.getElementById('menu-import-image').addEventListener('click', () => {
+  document.getElementById('menu-arquivo-dropdown').classList.remove('show');
+  imageFileInput.value = '';
+  imageFileInput.click();
+});
+
+imageFileInput.addEventListener('change', async () => {
+  for (const file of imageFileInput.files) {
+    await importImageFile(file);
+  }
+});
+
+let canvasFileDragDepth = 0;
+
+function eventContainsFiles(event) {
+  return Array.from(event.dataTransfer?.types || []).includes('Files');
+}
+
+container.addEventListener('dragenter', (event) => {
+  if (!eventContainsFiles(event)) return;
+  event.preventDefault();
+  canvasFileDragDepth++;
+  container.classList.add('drag-import-active');
+});
+
+container.addEventListener('dragover', (event) => {
+  if (!eventContainsFiles(event)) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'copy';
+});
+
+container.addEventListener('dragleave', (event) => {
+  if (!eventContainsFiles(event)) return;
+  canvasFileDragDepth = Math.max(0, canvasFileDragDepth - 1);
+  if (canvasFileDragDepth === 0) container.classList.remove('drag-import-active');
+});
+
+container.addEventListener('drop', async (event) => {
+  if (!eventContainsFiles(event)) return;
+  event.preventDefault();
+  canvasFileDragDepth = 0;
+  container.classList.remove('drag-import-active');
+
+  const files = Array.from(event.dataTransfer.files);
+  const supportedFiles = files.filter(file => isImageFile(file) || isVideoFile(file));
+
+  if (!supportedFiles.length) {
+    showToast('⚠️ Drop an image or video file here');
+    return;
+  }
+
+  for (const file of supportedFiles) {
+    if (isImageFile(file)) {
+      await importImageFile(file);
+    } else if (typeof window.importVideoFile === 'function') {
+      await window.importVideoFile(file);
+    }
+  }
+});
+
 // ─── Tool Selection ──────────────────────────────────────────────
 const SIZED_TOOLS = ['pencil', 'brush', 'eraser', 'line', 'rect', 'circle', 'curve'];
 
@@ -4604,7 +4741,7 @@ palette.forEach(color => {
 document.getElementById('btn-undo').addEventListener('click', undo);
 document.getElementById('btn-redo').addEventListener('click', redo);
 
-document.getElementById('btn-clear').addEventListener('click', () => {
+function clearActiveCanvas() {
   const lctx = getLCtx(); if (!lctx) return;
   lctx.clearRect(0, 0, canvasW, canvasH);
   const f = layers[activeLayerIdx]?.frames[state.currentFrame];
@@ -4615,7 +4752,9 @@ document.getElementById('btn-clear').addEventListener('click', () => {
   }
   compositeAll();
   saveHistory();
-});
+}
+
+document.getElementById('btn-clear-layer').addEventListener('click', clearActiveCanvas);
 
 document.getElementById('btn-export').addEventListener('click', () => {
   state.isExporting = true;
@@ -5885,7 +6024,7 @@ container.addEventListener('contextmenu', e => {
 
 // ─── Init ────────────────────────────────────────────────────────
 initCanvas(canvasW, canvasH, '#ffffff');
-setFgColor('#1a1a2e');
+setFgColor('#000000');
 setBgColor('#ffffff');
 setTool('pencil');
 setBrushSize(1);
@@ -5924,6 +6063,7 @@ requestAnimationFrame(() => {
 
 // ─── Global Timeline Scrubbing & Scrolling Listeners ─────────────
 const _gridOuter = document.getElementById('timeline-grid-outer');
+const _gridRuler = document.getElementById('timeline-grid-ruler');
 const _gridRows = document.getElementById('timeline-grid-rows');
 const _layersList = document.getElementById('timeline-layers-list');
 let _timelineScrubbing = false;
@@ -5961,6 +6101,15 @@ if (_gridRows) {
     } else {
       setCurrentFrame(f);
     }
+  });
+}
+
+if (_gridRuler) {
+  _gridRuler.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    _timelineScrubbing = true;
+    setCurrentFrame(_calcFrameFromMouse(e));
   });
 }
 

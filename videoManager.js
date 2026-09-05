@@ -141,9 +141,8 @@
     videoFileInput.click();
   });
 
-  videoFileInput.addEventListener('change', async () => {
-    const file = videoFileInput.files[0];
-    if (!file) return;
+  async function importVideoFile(file) {
+    if (!file) return false;
 
     const uniqueId = 'video_' + Date.now() + '_' + file.name;
     try {
@@ -152,63 +151,77 @@
 
     const url = URL.createObjectURL(file);
     const video = document.createElement('video');
-    video.src = url;
     video.muted = true;
     video.playsInline = true;
     video.preload = 'auto';
     video.crossOrigin = 'anonymous';
 
-    // Redraw whenever a seek completes (for scrubbing accuracy)
-    video.addEventListener('seeked', () => {
-      compositeAll();
-    });
+    return new Promise((resolve) => {
+      // Redraw whenever a seek completes (for scrubbing accuracy)
+      video.addEventListener('seeked', () => {
+        compositeAll();
+      });
 
-    video.addEventListener('loadedmetadata', () => {
-      const videoFramesCount = Math.ceil(video.duration * state.fps);
+      video.addEventListener('loadedmetadata', () => {
+        const videoFramesCount = Math.ceil(video.duration * state.fps);
 
-      // Expand timeline if the video is longer than existing frames
-      if (videoFramesCount > state.totalFrames) {
-        const extra = videoFramesCount - state.totalFrames;
-        for (let i = 0; i < extra; i++) {
-          layers.forEach(l => {
-            if (!l.isVideo) l.frames.push(createFrameData());
-          });
+        // Expand timeline if the video is longer than existing frames
+        if (videoFramesCount > state.totalFrames) {
+          const extra = videoFramesCount - state.totalFrames;
+          for (let i = 0; i < extra; i++) {
+            layers.forEach(l => {
+              if (!l.isVideo) l.frames.push(createFrameData());
+            });
+          }
+          state.totalFrames = videoFramesCount;
         }
-        state.totalFrames = videoFramesCount;
-      }
 
-      const shortName = file.name.replace(/\.[^.]+$/, '').substring(0, 20);
-      const videoLayer = {
-        id: layerIdCount++,
-        name: shortName || 'Video',
-        visible: true,
-        opacity: 0.6,
-        blendMode: 'source-over',
-        isVideo: true,
-        video: video,
-        videoPath: file.path || file.name,
-        videoCacheId: uniqueId,
-        videoDuration: video.duration,
-        videoOffline: false,
-        frames: []
-      };
+        const shortName = file.name.replace(/\.[^.]+$/, '').substring(0, 20);
+        const videoLayer = {
+          id: layerIdCount++,
+          name: shortName || 'Video',
+          visible: true,
+          opacity: 0.6,
+          blendMode: 'source-over',
+          isVideo: true,
+          video: video,
+          videoPath: file.path || file.name,
+          videoCacheId: uniqueId,
+          videoDuration: video.duration,
+          videoOffline: false,
+          frames: []
+        };
 
-      // Insert at bottom of stack (drawn first, under all drawings)
-      layers.push(videoLayer);
+        // Insert at bottom of stack (drawn first, under all drawings)
+        layers.push(videoLayer);
 
-      syncDOMVideos();
-      renderLayerPanel();
-      renderTimeline();
-      compositeAll();
-      saveHistory();
+        syncDOMVideos();
+        renderLayerPanel();
+        renderTimeline();
+        compositeAll();
+        saveHistory();
+        showToast('🎥 Video imported!');
+        resolve(true);
+      }, { once: true });
+
+      video.addEventListener('error', () => {
+        URL.revokeObjectURL(url);
+        alert('Error loading the video. Make sure the format is supported by your browser.');
+        resolve(false);
+      }, { once: true });
+
+      video.src = url;
+      video.load();
     });
+  }
 
-    video.addEventListener('error', () => {
-      alert('Error loading the video. Make sure the format is supported by your browser.');
-    });
+  videoFileInput.addEventListener('change', async () => {
+    const file = videoFileInput.files[0];
+    if (file) await importVideoFile(file);
   });
 
   // Expose functions to global scope
   window.syncDOMVideos = syncDOMVideos;
   window.reconnectVideoLayer = reconnectVideoLayer;
+  window.importVideoFile = importVideoFile;
 })();
