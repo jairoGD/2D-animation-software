@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Illustra — Illustration Software</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css?v=2" />
+</head>
+
+<body>
+  <!-- Hidden SVG Filters -->
+  <svg width="0" height="0" style="position:absolute; pointer-events:none;">
+    <filter id="pixelate-stroke">
+      <feComponentTransfer>
+        <feFuncA type="discrete" tableValues="0 1 1 1 1 1 1 1 1 1" />
+      </feComponentTransfer>
+    </filter>
+    <filter id="color-adjust-filter">
+      <!-- 1. Luminance (Lightness offset) -->
+      <feComponentTransfer id="luminance-transfer">
+        <feFuncR type="linear" slope="1" intercept="0"/>
+        <feFuncG type="linear" slope="1" intercept="0"/>
+        <feFuncB type="linear" slope="1" intercept="0"/>
+      </feComponentTransfer>
+      <!-- 2. Posterize (Color depth) -->
+      <feComponentTransfer id="posterize-transfer">
+        <feFuncR type="identity"/>
+        <feFuncG type="identity"/>
+        <feFuncB type="identity"/>
+      </feComponentTransfer>
+    </filter>
+  </svg>
+
+  <div id="app">
+    <!-- Top Bar -->
+    <header id="topbar">
+      <div class="topbar-left">
+        <div class="app-logo">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke="url(#logoGrad)" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round" />
+            <defs>
+              <linearGradient id="logoGrad" x1="0" y1="0" x2="24" y2="24" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#a78bfa" />
+                <stop offset="100%" stop-color="#60a5fa" />
+              </linearGradient>
+            </defs>
+          </svg>
+          <span class="app-name">Illustra</span>
+        </div>
+        <nav class="menu-nav">
+          <div class="menu-item-wrapper">
+            <button class="menu-btn" id="btn-new" title="File Menu">File</button>
+            <div class="dropdown-menu" id="menu-arquivo-dropdown">
+              <button class="dropdown-item" id="menu-open-project">
+                <span class="menu-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" xmlns="http://www.w3.org/2000/svg">
+                    <path
+                      d="M20 21H3C2.44772 21 2 20.5523 2 20L2 4C2 3.44772 2.44771 3 3 3H7.73381C8.08507 3 8.41058 3.1843 8.5913 3.4855L9.8087 5.5145C9.98942 5.8157 10.3149 6 10.6662 6H20C20.5523 6 21 6.44772 21 7V10" />
+                    <path
+                      d="M4.79903 10.7369L2.34449 19.7369C2.17099 20.373 2.64988 21 3.30925 21H19.2362C19.6872 21 20.0823 20.6982 20.201 20.2631L22.6555 11.2631C22.829 10.627 22.3501 10 21.6908 10H5.7638C5.31284 10 4.91769 10.3018 4.79903 10.7369Z" />
+                  </svg></span>
+                Open Project <span class="menu-shortcut">Ctrl+O</span>
+              </button>
+              <!-- Open Recent submenu -->
+              <div class="dropdown-submenu-wrapper" id="recent-submenu-wrapper">
+                <button class="dropdown-item dropdown-submenu-trigger" id="btn-recent-submenu">
+                  <span class="menu-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <circle cx="12" cy="12" r="10"></circle>
+                      <polyline points="12 6 12 12 16 14"></polyline>
+                    </svg>
+                  </span>
+                  Open recent
+                  <span class="menu-shortcut" style="margin-left:auto;">▶</span>
+                </button>
+                <div class="dropdown-submenu" id="menu-recent-submenu" style="min-width: 220px; max-height: 300px; overflow-y: auto;">
+                  <!-- dynamically populated -->
+                </div>
+              </div>
+              <div class="dropdown-separator"></div>
+              <button class="dropdown-item" id="menu-new-canvas">
+                <span class="menu-icon"><svg viewBox="0 0 502 502" fill="currentColor"
+                    xmlns="http://www.w3.org/2000/svg">
+                    <path
+                      d="M405.889,348.576V105.273c0-2.652-1.054-5.196-2.929-7.071L307.688,2.929C305.812,1.054,303.269,0,300.617,0H70.783c-5.523,0-10,4.477-10,10v445.916c0,5.523,4.477,10,10,10h216.442C303.083,488.611,328.615,502,356.57,502c46.674,0,84.646-37.972,84.646-84.646C441.217,389.827,428.102,364.485,405.889,348.576z M80.783,20h215.691l76.158,76.158h-51.151c-5.522,0-10,4.477-10,10s4.478,10,10,10h64.408v221.789c-9.334-3.451-19.247-5.241-29.319-5.241c-46.675,0-84.647,37.973-84.647,84.647c0,9.793,1.692,19.45,4.955,28.562H80.783V20z M356.57,482c-22.766,0-43.43-11.629-55.277-31.107c-6.13-10.077-9.37-21.675-9.37-33.539c0-35.646,29.001-64.647,64.647-64.647c11.785,0,23.28,3.21,33.334,9.278c0.474,0.355,0.979,0.67,1.513,0.938c18.668,11.975,29.799,32.278,29.799,54.431C421.217,453,392.217,482,356.57,482z" />
+                    <path
+                      d="M394.345,407.354h-27.776v-27.776c0-5.523-4.478-10-10-10s-10,4.477-10,10v27.776h-27.776c-5.522,0-10,4.477-10,10s4.478,10,10,10h27.776v27.776c0,5.523,4.478,10,10,10s10-4.477,10-10v-27.776h27.776c5.522,0,10-4.477,10-10S399.868,407.354,394.345,407.354z" />
+                    <path
+                      d="M292.56,106.158c0-5.523-4.478-10-10-10h-11.447c-5.522,0-10,4.477-10,10s4.478,10,10,10h11.447C288.083,116.158,292.56,111.681,292.56,106.158z" />
+                  </svg></span>
+                New Project <span class="menu-shortcut">Ctrl+N</span>
+              </button>
+              <button class="dropdown-item" id="menu-save-project">
+                <span class="menu-icon"><svg viewBox="0 0 32 32" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+                    <path
+                      d="M26 0H6a6 6 0 0 0-6 6v20a6 6 0 0 0 6 6h20a6 6 0 0 0 6-6V6a6 6 0 0 0-6-6zm-6 2v3a1 1 0 1 0 2 0V2h1v7H9V2zm10 24a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V6a4 4 0 0 1 4-4h1v8a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V2h1a4 4 0 0 1 4 4zM24 14H8a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V15a1 1 0 0 0-1-1zm-1 12H9V16h14zM12 20h8a1 1 0 0 0 0-2h-8a1 1 0 0 0 0 2zM12 24h8a1 1 0 0 0 0-2h-8a1 1 0 0 0 0 2z" />
+                  </svg></span>
+                Save Project <span class="menu-shortcut">Ctrl+S</span>
+              </button>
+              <div class="dropdown-separator"></div>
+              <button class="dropdown-item" id="menu-import-video">
+                <span class="menu-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
+                    <path
+                      d="M16 10L18.5768 8.45392C19.3699 7.97803 19.7665 7.74009 20.0928 7.77051C20.3773 7.79703 20.6369 7.944 20.806 8.17433C21 8.43848 21 8.90095 21 9.8259V14.1741C21 15.099 21 15.5615 20.806 15.8257C20.6369 16.056 20.3773 16.203 20.0928 16.2295C19.7665 16.2599 19.3699 16.022 18.5768 15.5461L16 14M6.5 11V15M6.5 15H10.5M6.5 15L12.5 9M6.2 18H12.8C13.9201 18 14.4802 18 14.908 17.782C15.2843 17.5903 15.5903 17.2843 15.782 16.908C16 16.4802 16 15.9201 16 14.8V9.2C16 8.0799 16 7.51984 15.782 7.09202C15.5903 6.71569 15.2843 6.40973 14.908 6.21799C14.4802 6 13.9201 6 12.8 6H6.2C5.0799 6 4.51984 6 4.09202 6.21799C3.71569 6.40973 3.40973 6.71569 3.21799 7.09202C3 7.51984 3 8.0799 3 9.2V14.8C3 15.9201 3 16.4802 3.21799 16.908C3.40973 17.2843 3.71569 17.5903 4.09202 17.782C4.51984 18 5.07989 18 6.2 18Z" />
+                  </svg></span>
+                Import Video
+              </button>
+              <button class="dropdown-item" id="menu-save-image">
+                <span class="menu-icon"><svg viewBox="0 0 32 32" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+                    <g transform="translate(-360,-99)">
+                      <path
+                        d="M368,109 C366.896,109 366,108.104 366,107 C366,105.896 366.896,105 368,105 C369.104,105 370,105.896 370,107 C370,108.104 369.104,109 368,109 Z M368,103 C365.791,103 364,104.791 364,107 C364,109.209 365.791,111 368,111 C370.209,111 372,109.209 372,107 C372,104.791 370.209,103 368,103 Z M390,116.128 L384,110 L374.059,120.111 L370,116 L362,123.337 L362,103 C362,101.896 362.896,101 364,101 L388,101 C389.104,101 390,101.896 390,103 L390,116.128 Z M390,127 C390,128.104 389.104,129 388,129 L382.832,129 L375.464,121.535 L384,112.999 L390,118.999 L390,127 Z M364,129 C362.896,129 362,128.104 362,127 L362,126.061 L369.945,118.945 L380.001,129 L364,129 Z M388,99 L364,99 C361.791,99 360,100.791 360,103 L360,127 C360,129.209 361.791,131 364,131 L388,131 C390.209,131 392,129.209 392,127 L392,103 C392,100.791 390.209,99 388,99 Z" />
+                    </g>
+                  </svg></span>
+                Save Image As...
+              </button>
+              <button class="dropdown-item" id="menu-export-animation">
+                <span class="menu-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
+                    <path
+                      d="M12.5 13V9M12.5 9H8.5M12.5 9L6.5 15M16 10L18.5768 8.45392C19.3699 7.97803 19.7665 7.74009 20.0928 7.77051C20.3773 7.79703 20.6369 7.944 20.806 8.17433C21 8.43848 21 8.90095 21 9.8259V14.1741C21 15.099 21 15.5615 20.806 15.8257C20.6369 16.056 20.3773 16.203 20.0928 16.2295C19.7665 16.2599 19.3699 16.022 18.5768 15.5461L16 14M6.2 18H12.8C13.9201 18 14.4802 18 14.908 17.782C15.2843 17.5903 15.5903 17.2843 15.782 16.908C16 16.4802 16 15.9201 16 14.8V9.2C16 8.0799 16 7.51984 15.782 7.09202C15.5903 6.71569 15.2843 6.40973 14.908 6.21799C14.4802 6 13.9201 6 12.8 6H6.2C5.0799 6 4.51984 6 4.09202 6.21799C3.71569 6.40973 3.40973 6.71569 3.21799 7.09202C3 7.51984 3 8.0799 3 9.2V14.8C3 15.9201 3 16.4802 3.21799 16.908C3.40973 17.2843 3.71569 17.5903 4.09202 17.782C4.51984 18 5.07989 18 6.2 18Z" />
+                  </svg></span>
+                Export Animation...
+              </button>
+            </div>
+
+          </div>
+          <div class="menu-item-wrapper">
+            <button class="menu-btn" id="btn-edit">Edit</button>
+            <div class="dropdown-menu" id="menu-editar-dropdown">
+              <button class="dropdown-item" id="menu-canvas-size">Canvas Size</button>
+              <button class="dropdown-item" id="menu-auto-adjust">Auto Adjust Canvas size <span class="menu-shortcut">Alt+A</span></button>
+              <div class="dropdown-separator"></div>
+              <button class="dropdown-item" id="menu-color-adjust">Color Adjustments</button>
+              <button class="dropdown-item" id="menu-color-ramp">Color Ramp</button>
+              <div class="dropdown-separator"></div>
+              <!-- Background submenu -->
+              <div class="dropdown-submenu-wrapper" id="bg-submenu-wrapper">
+                <button class="dropdown-item dropdown-submenu-trigger" id="btn-bg-submenu">
+                  <span class="menu-icon">
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+                      <rect x="2" y="2" width="12" height="12" rx="1.5"/>
+                      <path d="M2 6h12M6 2v12" stroke-width="1"/>
+                    </svg>
+                  </span>
+                  Background
+                  <span class="menu-shortcut" style="margin-left:auto;">▶</span>
+                </button>
+                <div class="dropdown-submenu" id="bg-submenu">
+                  <label class="bg-radio-item"><input type="radio" name="bgMode" value="white" checked> White</label>
+                  <label class="bg-radio-item"><input type="radio" name="bgMode" value="black"> Black</label>
+                  <label class="bg-radio-item"><input type="radio" name="bgMode" value="color"> Color
+                    <input type="color" id="bg-color-pick" value="#ffffff" style="margin-left:6px;width:20px;height:16px;border:none;padding:0;cursor:pointer;vertical-align:middle;">
+                  </label>
+                  <div class="dropdown-separator" style="margin:3px 8px;"></div>
+                  <label class="bg-radio-item"><input type="radio" name="bgMode" value="trans-bright"> Transparency (Bright Checker)</label>
+                  <label class="bg-radio-item"><input type="radio" name="bgMode" value="trans-dark"> Transparency (Dark Checker)</label>
+                  <label class="bg-radio-item"><input type="radio" name="bgMode" value="trans-white"> Transparency (White)</label>
+                  <label class="bg-radio-item"><input type="radio" name="bgMode" value="trans-black"> Transparency (Black)</label>
+                  <label class="bg-radio-item"><input type="radio" name="bgMode" value="trans-color"> Transparency (Color)</label>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="menu-item-wrapper">
+            <button class="menu-btn" id="btn-select">Select</button>
+            <div class="dropdown-menu" id="menu-select-dropdown">
+              <button class="dropdown-item" id="menu-select-more">Select more</button>
+              <button class="dropdown-item" id="menu-select-less">Select less</button>
+              <button class="dropdown-item" id="menu-select-invert">Invert selection <span class="menu-shortcut">Ctrl+I</span></button>
+              <button class="dropdown-item" id="menu-select-all">Select all <span class="menu-shortcut">Ctrl+A</span></button>
+              <div class="dropdown-separator"></div>
+              <button class="dropdown-item" id="menu-flip-horizontal">Flip Horizontal</button>
+              <button class="dropdown-item" id="menu-flip-vertical">Flip Vertical</button>
+            </div>
+          </div>
+          <button class="menu-btn" id="btn-view">View</button>
+        </nav>
+        <input type="file" id="video-input" accept="video/*" style="display: none;" />
+        <input type="file" id="project-open-input" accept=".tjl" style="display: none;" />
+      </div>
+      <div class="topbar-center">
+        <div class="tool-options" id="tool-options" style="gap: 16px;">
+          <div id="size-option-container" style="display: flex; align-items: center; gap: 8px;">
+            <label>Size:</label>
+            <input type="range" id="brush-size" min="1" max="100" value="1" />
+            <span id="brush-size-val">1px</span>
+          </div>
+
+          <div id="opacity-option-container" style="display: flex; align-items: center; gap: 8px;">
+            <label>Opacity:</label>
+            <input type="range" id="brush-opacity" min="1" max="100" value="100" />
+            <span id="brush-opacity-val">100%</span>
+          </div>
+
+          <div id="hardness-option-container" style="display: none; align-items: center; gap: 8px;">
+            <label>Hardness:</label>
+            <input type="range" id="brush-hardness" min="0" max="100" value="100" />
+            <span id="brush-hardness-val">100%</span>
+          </div>
+
+          <div id="spacing-option-container" style="display: none; align-items: center; gap: 8px;">
+            <label>Spacing:</label>
+            <input type="range" id="brush-spacing" min="1" max="100" value="15" />
+            <span id="brush-spacing-val">15%</span>
+          </div>
+
+          <div id="blur-radius-option-container" style="display: none; align-items: center; gap: 8px;">
+            <label>Blur Radius:</label>
+            <input type="range" id="brush-blur-radius" min="1" max="25" value="5" />
+            <span id="brush-blur-radius-val">5px</span>
+          </div>
+
+          <div id="blur-strength-option-container" style="display: none; align-items: center; gap: 8px;">
+            <label>Blur Strength:</label>
+            <input type="range" id="brush-blur-strength" min="1" max="100" value="25" />
+            <span id="brush-blur-strength-val">25%</span>
+          </div>
+
+          <div id="threshold-option-container" style="display: none; align-items: center; gap: 8px;">
+            <label>Threshold:</label>
+            <input type="range" id="bucket-threshold" min="0" max="255" value="30" />
+            <span id="bucket-threshold-val">30</span>
+            <label style="margin-left: 12px; display: flex; align-items: center; gap: 4px; cursor: pointer;" title="Consider all layers for selection/filling">
+              <input type="checkbox" id="all-layers-toggle" onchange="this.blur()" />
+              All Layers
+            </label>
+          </div>
+
+          <div id="lasso-options-container" style="display: none; align-items: center; gap: 8px;">
+            <label>Lasso:</label>
+            <button class="tool-action-btn active" id="btn-lasso-free" style="margin-left: 0;"
+              title="Freehand Lasso (freehand drawing)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 3c-1.5 0-3 1.5-3 3s1.5 3 3 3 3-1.5 3-3-1.5-3-3-3z" />
+                <path
+                  d="M8.5 7.5 C10 9 12 12 13 14 C14.5 17 12 21 9 21 C6 21 4 19 4 16 C4 13 8 10 12 9 C15 8 20 10 21 13 C22 16 19 20 15 21" />
+              </svg>
+              Freehand
+            </button>
+            <button class="tool-action-btn" id="btn-lasso-rect" style="margin-left: 0;"
+              title="Rectangular Lasso (rectangular selection)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="18" height="18" rx="1" />
+              </svg>
+              Rectangular
+            </button>
+          </div>
+
+          <label style="margin-left:16px; display:flex; align-items:center; gap:4px; cursor:pointer;"
+            title="Enable or disable anti-aliasing">
+            <input type="checkbox" id="anti-alias-toggle" checked onchange="this.blur()" />
+            Anti-Aliasing
+          </label>
+        </div>
+        <button id="btn-lasso-transform" class="tool-action-btn hidden"
+          title="Enable 2D controls for Scale and Rotation">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 3h18v18H3z" />
+            <circle cx="3" cy="3" r="2" fill="currentColor" />
+            <circle cx="21" cy="3" r="2" fill="currentColor" />
+            <circle cx="21" cy="21" r="2" fill="currentColor" />
+            <circle cx="3" cy="21" r="2" fill="currentColor" />
+            <path d="M12 8v8M8 12h8" />
+          </svg>
+          Transform
+        </button>
+      </div>
+      <div class="topbar-right">
+        <div class="zoom-indicator" id="zoom-indicator">100%</div>
+        <button class="icon-btn" id="btn-undo" title="Undo (Ctrl+Z)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 7v6h6" />
+            <path d="M3 13A9 9 0 1 0 6 6.7L3 7" />
+          </svg>
+        </button>
+        <button class="icon-btn" id="btn-redo" title="Redo (Ctrl+Y)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 7v6h-6" />
+            <path d="M21 13A9 9 0 1 1 18 6.7L21 7" />
+          </svg>
+        </button>
+        <button class="icon-btn" id="btn-clear" title="Clear Canvas">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="3 6 5 6 21 6" />
+            <path d="M19 6l-1 14H6L5 6" />
+            <path d="M10 11v6M14 11v6" />
+            <path d="M9 6V4h6v2" />
+          </svg>
+        </button>
+        <button class="icon-btn" id="btn-export" title="Export PNG">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <div id="workspace">
+      <!-- Sidebar -->
+      <aside id="sidebar">
+        <div class="sidebar-section" id="tools-section">
+          <div class="section-title">TOOLS</div>
+
+          <button class="tool-btn active" id="tool-pencil" data-tool="pencil" title="Pencil (B)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+            </svg>
+            <span>Pencil</span>
+          </button>
+
+          <button class="tool-btn" id="tool-brush" data-tool="brush" title="Brush (P) / Blur (Alt)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M9.06 11.9l8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08" />
+              <path d="M7.07 14.94C5.79 16.22 4 17 2 17c.5-2 1.78-3.79 3.06-5.07l2.01 2.01z" />
+            </svg>
+            <span>Brush</span>
+          </button>
+
+          <button class="tool-btn" id="tool-eraser" data-tool="eraser" title="Eraser (E)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M20 20H7L3 16l11-11 6 6-1.5 1.5" />
+              <path d="M6.0 11.0 L13 18" />
+            </svg>
+            <span>Eraser</span>
+          </button>
+
+          <button class="tool-btn" id="tool-lasso" data-tool="lasso" title="Lasso (S)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+              stroke-linecap="round" stroke-linejoin="round">
+              <path d="M6 3c-1.5 0-3 1.5-3 3s1.5 3 3 3 3-1.5 3-3-1.5-3-3-3z" />
+              <path
+                d="M8.5 7.5 C10 9 12 12 13 14 C14.5 17 12 21 9 21 C6 21 4 19 4 16 C4 13 8 10 12 9 C15 8 20 10 21 13 C22 16 19 20 15 21" />
+            </svg>
+            <span>Lasso</span>
+          </button>
+
+          <button class="tool-btn" id="tool-magicwand" data-tool="magicwand" title="Magic Wand (W)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+              stroke-linecap="round" stroke-linejoin="round">
+              <path d="M15 4V2M15 16v-2M8 9h2M20 9h-2M17.8 4.2l-1.4 1.4M7.6 14.4l-1.4 1.4M6.2 4.2l1.4 1.4M16.4 14.4l1.4 1.4M2 22l6-6M9.5 14.5l6-6"/>
+            </svg>
+            <span>Wand</span>
+          </button>
+
+          <button class="tool-btn" id="tool-fill" data-tool="fill" title="Bucket (G)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M19 11c0 5-7 11-7 11S5 16 5 11a7 7 0 0 1 14 0z" />
+              <circle cx="12" cy="11" r="1" fill="currentColor" />
+              <path d="M21 16s1 2-1 2-2-2-2-2 1-2 2-2 1 2 1 2z" />
+            </svg>
+            <span>Bucket</span>
+          </button>
+
+          <button class="tool-btn" id="tool-eyedropper" data-tool="eyedropper" title="Eyedropper (I)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M2 13.5V22h8.5l9.46-9.46a2 2 0 0 0 0-2.83L14.29 4.05a2 2 0 0 0-2.83 0L2 13.5z" />
+              <line x1="5.5" y1="18.5" x2="13.5" y2="10.5" />
+              <path d="M19 4l2 2-2-2" />
+            </svg>
+            <span>Eyedropper</span>
+          </button>
+
+          <div class="tool-separator"></div>
+
+          <button class="tool-btn" id="tool-line" data-tool="line" title="Line (L)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <line x1="5" y1="19" x2="19" y2="5" />
+            </svg>
+            <span>Line</span>
+          </button>
+
+          <button class="tool-btn" id="tool-curve" data-tool="curve" title="Curve (U)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M4 19c6-10 14-10 16 0" />
+            </svg>
+            <span>Curve</span>
+          </button>
+
+          <button class="tool-btn" id="tool-rect" data-tool="rect" title="Rectangle (R)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <rect x="3" y="5" width="18" height="14" rx="1" />
+            </svg>
+            <span>Rectangle</span>
+          </button>
+
+          <button class="tool-btn" id="tool-circle" data-tool="circle" title="Ellipse (C)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <ellipse cx="12" cy="12" rx="9" ry="6" />
+            </svg>
+            <span>Ellipse</span>
+          </button>
+        </div>
+      </aside>
+
+      <!-- Canvas Area -->
+      <main id="canvas-area">
+        <div id="canvas-container">
+          <canvas id="main-canvas"></canvas>
+          <canvas id="preview-canvas"></canvas>
+        </div>
+        <!-- Status Bar -->
+        <div id="status-bar">
+          <span id="coords-display">X: 0 Y: 0</span>
+          <span id="canvas-size-display">1280 × 720 px</span>
+          <span id="tool-status">Pencil active</span>
+          <span id="pan-hint">Space + Drag to pan • Scroll to zoom</span>
+        </div>
+      </main>
+
+      <aside id="layers-panel">
+        <div class="sidebar-section" id="color-section" style="border-bottom: 1px solid var(--border); padding: 8px 10px; flex-shrink: 0;">
+          <div class="section-title" style="margin-bottom: 6px;">COLOR</div>
+          <div class="color-controls-row" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; gap: 8px;">
+            <div class="color-preview-area" style="position: relative; width: 38px; height: 32px; margin: 0; flex-shrink: 0;">
+              <div class="color-swatch-bg" id="color-bg-swatch" style="width: 22px; height: 20px; border-radius: 3px; border: 1.5px solid var(--bg-deepest);"></div>
+              <div class="color-swatch-fg" id="color-fg-swatch" style="width: 24px; height: 22px; border-radius: 4px; border: 1.5px solid var(--border-light);"></div>
+              <button class="swap-colors-btn" id="swap-colors" title="Swap colors (X)" style="width: 14px; height: 14px; top: -4px; right: -4px; padding: 0;">
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                  <path d="M7 16V4m0 0L3 8m4-4l4 4M17 8v12m0 0l4-4m-4 4l-4-4" />
+                </svg>
+              </button>
+            </div>
+            <div class="color-input-row" style="display: flex; align-items: center; gap: 6px; margin: 0; flex: 1; justify-content: flex-end;">
+              <input type="color" id="color-picker" value="#1a1a2e" title="Primary color" style="width: 22px; height: 22px; padding: 1px;" />
+              <span class="color-hex-label" id="color-hex-label" style="font-size: 9.5px; font-family: monospace; letter-spacing: -0.2px;">#1A1A2E</span>
+            </div>
+          </div>
+          <div class="palette-grid" id="palette-grid" style="grid-template-columns: repeat(10, 1fr); gap: 3px;"></div>
+        </div>
+
+        <div class="layers-header">
+          <span class="section-title" style="margin:0">LAYERS</span>
+          <div class="layers-header-btns">
+            <button class="layer-icon-btn" id="btn-layer-up" title="Move layer up">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <polyline points="18 15 12 9 6 15" />
+              </svg>
+            </button>
+            <button class="layer-icon-btn" id="btn-layer-down" title="Move layer down">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
+            <button class="layer-icon-btn" id="btn-add-layer" title="New layer">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+            <button class="layer-icon-btn" id="btn-merge-layer" title="Merge with layer below">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path d="M12 5v14M19 12l-7 7-7-7" />
+                <path d="M4 21h16" />
+              </svg>
+            </button>
+            <button class="layer-icon-btn danger" id="btn-del-layer" title="Delete layer">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6l-1 14H6L5 6" />
+                <path d="M10 11v6M14 11v6" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div id="layers-list"></div>
+
+        <div class="layer-opacity-row">
+          <label>Opacity</label>
+          <input type="range" id="layer-opacity" min="0" max="100" value="100" />
+          <span id="layer-opacity-val">100%</span>
+        </div>
+      </aside>
+    </div>
+
+    <!-- Bottom: Timeline -->
+    <div id="timeline">
+      <div class="timeline-header">
+        <div class="timeline-left">
+          <button class="timeline-btn" id="btn-play" title="Play/Pause animation">
+            <svg id="play-icon" width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+              <polygon points="5 3 19 12 5 21 5 3" />
+            </svg>
+          </button>
+          <div class="timeline-fps-wrap">
+            <input type="number" id="timeline-fps" value="12" min="1" max="60" />
+            <span>FPS</span>
+          </div>
+          <label class="timeline-loop-wrap">
+            <input type="checkbox" id="timeline-loop" checked />
+            <span>Loop</span>
+          </label>
+        </div>
+        <div class="timeline-center">
+          <div class="timeline-frame-counter">
+            Frame: <span id="current-frame-indicator" class="accent-text">1</span> / <span
+              id="total-frames-indicator">24</span>
+          </div>
+        </div>
+        <div class="timeline-right">
+          <label class="timeline-fps-wrap" title="Total frames">
+            <span>Frames:</span>
+            <input type="number" id="timeline-total-frames" value="24" min="1" max="9999" />
+          </label>
+          <button class="timeline-action-btn" id="btn-add-frame-col" title="Add frame at the end">+ Frame</button>
+          <button class="timeline-action-btn" id="btn-del-frame-col" title="Remove last frame">- Frame</button>
+          <button class="timeline-action-btn" id="btn-onion" title="Enable Onion Skin">Onion
+            Skin</button>
+        </div>
+      </div>
+      <div class="timeline-body">
+        <div class="timeline-layers" id="timeline-layers-list"></div>
+        <div class="timeline-grid-outer" id="timeline-grid-outer">
+          <div class="timeline-grid-header" id="timeline-grid-ruler"></div>
+          <div class="timeline-grid-rows" id="timeline-grid-rows"></div>
+          <div id="timeline-playhead"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- New Canvas Modal -->
+  <div id="modal-overlay" class="hidden">
+    <div id="modal-new-canvas">
+      <h2>New Project</h2>
+      <div class="modal-field">
+        <label>Width (px)</label>
+        <input type="number" id="new-width" value="1280" min="1" max="8000" />
+      </div>
+      <div class="modal-field">
+        <label>Height (px)</label>
+        <input type="number" id="new-height" value="720" min="1" max="8000" />
+      </div>
+      <div class="modal-field">
+        <label>Background color</label>
+        <input type="color" id="new-bg" value="#ffffff" />
+      </div>
+      <div class="modal-actions">
+        <button id="modal-cancel">Cancel</button>
+        <button id="modal-create" class="primary">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Canvas Size Modal -->
+  <div id="canvas-size-overlay" class="hidden">
+    <div id="modal-canvas-size">
+      <h2>Canvas Size</h2>
+      <div class="modal-field">
+        <label>Width (px)</label>
+        <input type="number" id="resize-width" value="1280" min="1" max="8000" />
+      </div>
+      <div class="modal-field">
+        <label>Height (px)</label>
+        <input type="number" id="resize-height" value="720" min="1" max="8000" />
+      </div>
+      <div class="modal-actions">
+        <button id="resize-cancel">Cancel</button>
+        <button id="resize-apply" class="primary">Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modify Selection Modal -->
+  <div id="select-modify-overlay" class="hidden">
+    <div id="modal-select-modify">
+      <h2 id="select-modify-title">Expand Selection</h2>
+      <div class="modal-field">
+        <label>Pixels</label>
+        <input type="number" id="select-modify-amount" value="1" min="1" max="100" />
+      </div>
+      <div class="modal-actions">
+        <button id="select-modify-cancel">Cancel</button>
+        <button id="select-modify-apply" class="primary">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Export Animation Modal -->
+  <div id="export-overlay" class="hidden">
+    <div id="modal-export-animation">
+      <h2>Export Animation</h2>
+      <p style="font-size:12px; color:var(--text-dim); margin-bottom:16px;">Select the export format for your animation.</p>
+
+      <div class="modal-field">
+        <label>File Name</label>
+        <input type="text" id="export-filename" value="animation" />
+      </div>
+
+      <div class="export-options-grid">
+        <button class="export-opt-btn active" id="opt-export-zip">
+          <div class="opt-icon">📦</div>
+          <div class="opt-title">Sequence (ZIP)</div>
+          <div class="opt-desc">Exports all frames compressed as PNG.</div>
+        </button>
+        <button class="export-opt-btn" id="opt-export-video">
+          <div class="opt-icon">🎬</div>
+          <div class="opt-title">Video (WebM)</div>
+          <div class="opt-desc">Exports the animation as video synced to FPS.</div>
+        </button>
+        <button class="export-opt-btn" id="opt-export-gif">
+          <div class="opt-icon">🖼️</div>
+          <div class="opt-title">Animated GIF</div>
+          <div class="opt-desc">Exports the complete animation as a lightweight animated GIF.</div>
+        </button>
+        <button class="export-opt-btn" id="opt-export-spritesheet">
+          <div class="opt-icon">▦</div>
+          <div class="opt-title">Sprite Sheet</div>
+          <div class="opt-desc">Exports the animation as a game-ready sprite sheet.</div>
+        </button>
+      </div>
+
+      <div id="export-spritesheet-options" class="export-spritesheet-options hidden">
+        <div class="modal-field">
+          <label>Frames Horizontal</label>
+          <input type="number" id="export-spritesheet-columns" value="4" min="1" step="1" />
+        </div>
+        <div class="modal-field">
+          <label>Frames Vertical</label>
+          <input type="number" id="export-spritesheet-rows" value="4" min="1" step="1" />
+        </div>
+      </div>
+
+      <div id="export-progress-container" class="hidden" style="margin-top:16px;">
+        <div style="display:flex; justify-content:space-between; font-size:11px; margin-bottom:4px; color:var(--text);">
+          <span>Processing...</span>
+          <span id="export-progress-text">0%</span>
+        </div>
+        <div style="width:100%; height:6px; background:var(--bg-deepest); border-radius:3px; overflow:hidden;">
+          <div id="export-progress-bar"
+            style="width:0%; height:100%; background:var(--accent); transition: width 0.1s;"></div>
+        </div>
+      </div>
+
+      <div class="modal-actions" style="margin-top:20px;">
+        <button id="export-cancel">Cancel</button>
+        <button id="export-start" class="primary">Export</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Context Menu for Timeline -->
+  <div id="timeline-context-menu" class="hidden">
+    <div class="menu-item" id="ctx-copy-frame">Copy Frame</div>
+    <div class="menu-item" id="ctx-paste-frame">Paste Frame</div>
+    <div class="menu-divider"></div>
+    <div class="menu-item danger" id="ctx-clear-frame">Clear Frame</div>
+  </div>
+
+  <div id="layer-context-menu" class="hidden">
+    <div class="menu-item submenu-trigger">
+      <span>Blend Mode</span>
+      <span class="submenu-arrow">▶</span>
+      
+      <div class="submenu-panel">
+        <div class="menu-item" data-mode="source-over">Normal</div>
+        <div class="menu-item" data-mode="multiply">Multiply</div>
+        <div class="menu-item" data-mode="screen">Screen</div>
+        <div class="menu-item" data-mode="overlay">Overlay</div>
+        <div class="menu-item" data-mode="darken">Darken</div>
+        <div class="menu-item" data-mode="lighten">Lighten</div>
+        <div class="menu-item" data-mode="color-dodge">Color Dodge</div>
+        <div class="menu-item" data-mode="color-burn">Color Burn</div>
+        <div class="menu-item" data-mode="hard-light">Hard Light</div>
+        <div class="menu-item" data-mode="soft-light">Soft Light</div>
+        <div class="menu-item" data-mode="difference">Difference</div>
+        <div class="menu-item" data-mode="exclusion">Exclusion</div>
+        <div class="menu-item" data-mode="hue">Hue</div>
+        <div class="menu-item" data-mode="saturation">Saturation</div>
+        <div class="menu-item" data-mode="color">Color</div>
+        <div class="menu-item" data-mode="luminosity">Luminosity</div>
+        <div class="menu-divider"></div>
+        <div class="menu-item" data-mode="lighter">Add</div>
+        <div class="menu-item" data-mode="destination-in">Mask</div>
+        <div class="menu-item" data-mode="invert">Invert</div>
+      </div>
+    </div>
+    <div class="menu-item" id="ctx-rename-layer">Rename</div>
+  </div>
+
+  <!-- Color Adjustments Modal -->
+  <div id="color-adjust-modal" class="mini-window hidden">
+    <div class="mini-window-header" id="color-adjust-header">
+      <span>Color Adjustments</span>
+      <button class="mini-window-close" id="color-adjust-close">&times;</button>
+    </div>
+    <div class="mini-window-body">
+      <div class="adjust-group">
+        <label>Hue</label>
+        <div class="adjust-control">
+          <input type="range" id="adjust-hue" min="-180" max="180" value="0" />
+          <span id="adjust-hue-val">0°</span>
+        </div>
+      </div>
+      
+      <div class="adjust-group">
+        <label>Saturation</label>
+        <div class="adjust-control">
+          <input type="range" id="adjust-saturation" min="0" max="200" value="100" />
+          <span id="adjust-saturation-val">100%</span>
+        </div>
+      </div>
+
+      <div class="adjust-group">
+        <label>Luminance</label>
+        <div class="adjust-control">
+          <input type="range" id="adjust-luminance" min="-100" max="100" value="0" />
+          <span id="adjust-luminance-val">0%</span>
+        </div>
+      </div>
+
+      <div class="adjust-group">
+        <label>Brightness</label>
+        <div class="adjust-control">
+          <input type="range" id="adjust-brightness" min="0" max="200" value="100" />
+          <span id="adjust-brightness-val">100%</span>
+        </div>
+      </div>
+
+      <div class="adjust-group">
+        <label>Contrast</label>
+        <div class="adjust-control">
+          <input type="range" id="adjust-contrast" min="0" max="200" value="100" />
+          <span id="adjust-contrast-val">100%</span>
+        </div>
+      </div>
+
+      <div class="adjust-group">
+        <label>Depth / Blur</label>
+        <div class="adjust-control">
+          <input type="range" id="adjust-depth" min="0" max="20" value="0" step="0.5" />
+          <span id="adjust-depth-val">0px</span>
+        </div>
+      </div>
+
+      <div class="adjust-group">
+        <label>Posterize (Color Depth)</label>
+        <div class="adjust-control">
+          <input type="range" id="adjust-posterize" min="2" max="256" value="256" />
+          <span id="adjust-posterize-val">256</span>
+        </div>
+      </div>
+
+      <div class="adjust-group">
+        <label>Mosaic Blur</label>
+        <div class="adjust-control">
+          <input type="range" id="adjust-mosaic" min="1" max="100" value="1" />
+          <span id="adjust-mosaic-val">1px</span>
+        </div>
+      </div>
+
+      <div class="adjust-group-row">
+        <label class="adjust-checkbox-label">
+          <input type="checkbox" id="adjust-all-layers" />
+          <span>All Layers</span>
+        </label>
+      </div>
+
+      <div class="adjust-group-row" style="margin-top: 2px;">
+        <label class="adjust-checkbox-label">
+          <input type="checkbox" id="adjust-invert" />
+          <span>Invert Colors</span>
+        </label>
+      </div>
+
+      <div class="adjust-actions">
+        <button id="adjust-cancel" class="adjust-btn">Cancel</button>
+        <button id="adjust-apply" class="adjust-btn primary">Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Color Ramp Modal -->
+  <div id="color-ramp-modal" class="mini-window hidden">
+    <div class="mini-window-header" id="color-ramp-header">
+      <span>Color Ramp</span>
+      <button class="mini-window-close" id="color-ramp-close">&times;</button>
+    </div>
+    <div class="mini-window-body">
+      <!-- Gradient Editor -->
+      <div class="adjust-group">
+        <label>Color Ramp</label>
+        <div class="color-ramp-editor-container">
+          <div id="color-ramp-gradient-bar" class="color-ramp-gradient-bar"></div>
+          <div id="color-ramp-stops-container" class="color-ramp-stops-container"></div>
+        </div>
+      </div>
+      
+      <!-- Controls for selected Stop -->
+      <div class="adjust-group-row-split" style="display: flex; gap: 10px; justify-content: space-between; align-items: center; margin-top: 10px;">
+        <div class="adjust-group" style="flex: 1;">
+          <label>Position</label>
+          <input type="number" id="color-ramp-stop-position" min="0" max="100" value="0" style="width: 100%; height: 26px; background: var(--bg-active); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); padding: 2px 6px; font-size: 11px;" />
+        </div>
+        <div class="adjust-group" style="flex: 1;">
+          <label>Color</label>
+          <input type="color" id="color-ramp-stop-color" style="width: 100%; height: 26px; border: none; padding: 0; background: none; cursor: pointer;" />
+        </div>
+      </div>
+
+      <!-- Add/Remove Stop Buttons -->
+      <div style="display: flex; gap: 8px; margin-top: 5px;">
+        <button id="color-ramp-add-stop" class="adjust-btn" style="flex: 1; padding: 5px; font-size: 11px;">+ Add Stop</button>
+        <button id="color-ramp-remove-stop" class="adjust-btn" style="flex: 1; padding: 5px; font-size: 11px;">- Remove Stop</button>
+      </div>
+
+      <!-- Interpolation Dropdown -->
+      <div class="adjust-group" style="margin-top: 5px;">
+        <label>Interpolation</label>
+        <select id="color-ramp-interpolation" style="width: 100%; height: 26px; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); padding: 2px 6px; font-size: 11px; cursor: pointer;">
+          <option value="linear">Linear</option>
+          <option value="constant">Constant</option>
+        </select>
+      </div>
+
+      <div class="adjust-group-row" style="margin-top: 5px;">
+        <label class="adjust-checkbox-label">
+          <input type="checkbox" id="color-ramp-all-layers" />
+          <span>All Layers</span>
+        </label>
+      </div>
+
+      <div class="adjust-actions" style="margin-top: 10px;">
+        <button id="color-ramp-cancel" class="adjust-btn">Cancel</button>
+        <button id="color-ramp-apply" class="adjust-btn primary">Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script>window.exports = {};</script>
+  <script src="gifenc.umd.js"></script>
+  <script src="videoManager.js"></script>
+  <script src="projectManager.js?v=4"></script>
+  <script src="exportManager.js?v=4"></script>
+  <script src="app.js?v=49"></script>
+</body>
+
+</html>
