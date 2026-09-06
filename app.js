@@ -19,8 +19,11 @@ const state = {
   brushSpacing: 0.15,
   brushBlurRadius: 5,
   brushBlurStrength: 0.25,
+  blurScratchPixels: null,
+  blurOriginalPixels: null,
   brushTipCanvas: null,
   brushTipImageData: null,
+  brushTipDirty: true,
   eraserOriginalPixels: null,
   eraserCoverage: null,
   eraserCoverageWidth: 0,
@@ -2042,66 +2045,133 @@ function updateBrushTip() {
   }
   ctx.putImageData(imgData, 0, 0);
   state.brushTipImageData = imgData;
+  state.brushTipDirty = false;
 }
 
-function alphaWeightedBoxBlur(imgData, size, radius) {
-  const data = imgData.data;
-  const width = size;
-  const height = size;
-  const outData = new Uint8ClampedArray(data.length);
-  
-  const passes = 2;
-  let currentData = data;
-  let nextData = outData;
-  
-  for (let pass = 0; pass < passes; pass++) {
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        let sumR = 0, sumG = 0, sumB = 0, sumA = 0, count = 0;
-        
-        for (let ky = -radius; ky <= radius; ky++) {
-          const ny = y + ky;
-          if (ny < 0 || ny >= height) continue;
-          
-          for (let kx = -radius; kx <= radius; kx++) {
-            const nx = x + kx;
-            if (nx < 0 || nx >= width) continue;
-            
-            const idx = (nx + ny * width) * 4;
-            const r = currentData[idx];
-            const g = currentData[idx+1];
-            const b = currentData[idx+2];
-            const a = currentData[idx+3];
-            
-            sumR += r * a;
-            sumG += g * a;
-            sumB += b * a;
-            sumA += a;
-            count++;
-          }
-        }
-        
-        const idx = (x + y * width) * 4;
-        if (sumA > 0) {
-          nextData[idx]   = Math.round(sumR / sumA);
-          nextData[idx+1] = Math.round(sumG / sumA);
-          nextData[idx+2] = Math.round(sumB / sumA);
-          nextData[idx+3] = Math.round(sumA / count);
-        } else {
-          nextData[idx]   = currentData[idx];
-          nextData[idx+1] = currentData[idx+1];
-          nextData[idx+2] = currentData[idx+2];
-          nextData[idx+3] = 0;
-        }
-      }
-    }
-    const temp = currentData;
-    currentData = nextData;
-    nextData = temp;
+function ensureBrushTip() {
+  const expectedSize = Math.max(1, Math.round(state.brushSize));
+  if (state.brushTipDirty || !state.brushTipCanvas ||
+      state.brushTipCanvas.width !== expectedSize || state.brushTipCanvas.height !== expectedSize) {
+    updateBrushTip();
   }
-  
-  if (currentData !== data) {
-    data.set(currentData);
+}
+
+function boxBlurHorizontal(source, target, width, height, leftRadius, rightRadius) {
+  const windowSize = leftRadius + rightRadius + 1;
+
+  for (let y = 0; y < height; y++) {
+    const rowStart = y * width;
+    let sumR = 0, sumG = 0, sumB = 0, sumA = 0;
+
+    for (let offset = -leftRadius; offset <= rightRadius; offset++) {
+      const x = Math.max(0, Math.min(width - 1, offset));
+      const index = (rowStart + x) * 4;
+      sumR += source[index];
+      sumG += source[index + 1];
+      sumB += source[index + 2];
+      sumA += source[index + 3];
+    }
+
+    for (let x = 0; x < width; x++) {
+      const targetIndex = (rowStart + x) * 4;
+      target[targetIndex] = Math.round(sumR / windowSize);
+      target[targetIndex + 1] = Math.round(sumG / windowSize);
+      target[targetIndex + 2] = Math.round(sumB / windowSize);
+      target[targetIndex + 3] = Math.round(sumA / windowSize);
+
+      const removeX = Math.max(0, Math.min(width - 1, x - leftRadius));
+      const addX = Math.max(0, Math.min(width - 1, x + rightRadius + 1));
+      const removeIndex = (rowStart + removeX) * 4;
+      const addIndex = (rowStart + addX) * 4;
+      sumR += source[addIndex] - source[removeIndex];
+      sumG += source[addIndex + 1] - source[removeIndex + 1];
+      sumB += source[addIndex + 2] - source[removeIndex + 2];
+      sumA += source[addIndex + 3] - source[removeIndex + 3];
+    }
+  }
+}
+
+function boxBlurVertical(source, target, width, height, topRadius, bottomRadius) {
+  const windowSize = topRadius + bottomRadius + 1;
+
+  for (let x = 0; x < width; x++) {
+    let sumR = 0, sumG = 0, sumB = 0, sumA = 0;
+
+    for (let offset = -topRadius; offset <= bottomRadius; offset++) {
+      const y = Math.max(0, Math.min(height - 1, offset));
+      const index = (x + y * width) * 4;
+      sumR += source[index];
+      sumG += source[index + 1];
+      sumB += source[index + 2];
+      sumA += source[index + 3];
+    }
+
+    for (let y = 0; y < height; y++) {
+      const targetIndex = (x + y * width) * 4;
+      target[targetIndex] = Math.round(sumR / windowSize);
+      target[targetIndex + 1] = Math.round(sumG / windowSize);
+      target[targetIndex + 2] = Math.round(sumB / windowSize);
+      target[targetIndex + 3] = Math.round(sumA / windowSize);
+
+      const removeY = Math.max(0, Math.min(height - 1, y - topRadius));
+      const addY = Math.max(0, Math.min(height - 1, y + bottomRadius + 1));
+      const removeIndex = (x + removeY * width) * 4;
+      const addIndex = (x + addY * width) * 4;
+      sumR += source[addIndex] - source[removeIndex];
+      sumG += source[addIndex + 1] - source[removeIndex + 1];
+      sumB += source[addIndex + 2] - source[removeIndex + 2];
+      sumA += source[addIndex + 3] - source[removeIndex + 3];
+    }
+  }
+}
+
+// Three separable box passes approximate a Gaussian kernel to within roughly
+// 3%, as recommended by the W3C SVG filter specification for sigma >= 2.
+function gaussianBlurImageData(imgData, width, height, sigma, reusableScratch = null) {
+  if (width < 1 || height < 1 || sigma <= 0) return;
+
+  const pixels = imgData.data;
+  const scratch = reusableScratch && reusableScratch.length === pixels.length
+    ? reusableScratch
+    : new Uint8ClampedArray(pixels.length);
+
+  // Blur premultiplied colors so transparent pixels cannot leak arbitrary RGB.
+  for (let index = 0; index < pixels.length; index += 4) {
+    const alpha = pixels[index + 3] / 255;
+    pixels[index] = Math.round(pixels[index] * alpha);
+    pixels[index + 1] = Math.round(pixels[index + 1] * alpha);
+    pixels[index + 2] = Math.round(pixels[index + 2] * alpha);
+  }
+
+  const diameter = Math.max(1, Math.floor(sigma * 3 * Math.sqrt(2 * Math.PI) / 4 + 0.5));
+  const passes = diameter % 2 === 1
+    ? [
+        { before: (diameter - 1) / 2, after: (diameter - 1) / 2 },
+        { before: (diameter - 1) / 2, after: (diameter - 1) / 2 },
+        { before: (diameter - 1) / 2, after: (diameter - 1) / 2 },
+      ]
+    : [
+        { before: diameter / 2, after: diameter / 2 - 1 },
+        { before: diameter / 2 - 1, after: diameter / 2 },
+        { before: diameter / 2, after: diameter / 2 },
+      ];
+
+  for (const pass of passes) {
+    boxBlurHorizontal(pixels, scratch, width, height, pass.before, pass.after);
+    boxBlurVertical(scratch, pixels, width, height, pass.before, pass.after);
+  }
+
+  for (let index = 0; index < pixels.length; index += 4) {
+    const alpha = pixels[index + 3];
+    if (alpha > 0) {
+      pixels[index] = Math.min(255, Math.round(pixels[index] * 255 / alpha));
+      pixels[index + 1] = Math.min(255, Math.round(pixels[index + 1] * 255 / alpha));
+      pixels[index + 2] = Math.min(255, Math.round(pixels[index + 2] * 255 / alpha));
+    } else {
+      pixels[index] = 0;
+      pixels[index + 1] = 0;
+      pixels[index + 2] = 0;
+    }
   }
 }
 
@@ -2207,73 +2277,44 @@ function drawBrushStamp(ctx, cx, cy, radius, size, brushCanvas) {
   }
 
   if (state.tool === 'brush' && state.isAltDrawing) {
-    const blurRadius = state.brushBlurRadius || 5;
-    const padding = blurRadius + 2;
-    const capturedSize = size + 2 * padding;
-    
-    // Bounding box for capture (centered at cx, cy)
-    const capX = Math.round(cx - radius - padding);
-    const capY = Math.round(cy - radius - padding);
-    
-    if (isNaN(capX) || isNaN(capY)) return;
-    
-    if (!state.blurSrcCanvas) {
-      state.blurSrcCanvas = document.createElement('canvas');
+    const blurRadius = Math.max(0.5, state.brushBlurRadius || 5);
+    // A Gaussian kernel is effectively contained within three standard deviations.
+    const padding = Math.ceil(blurRadius * 3) + 2;
+    const canvasWidth = ctx.canvas.width;
+    const canvasHeight = ctx.canvas.height;
+    const capX = Math.max(0, Math.floor(cx - radius - padding));
+    const capY = Math.max(0, Math.floor(cy - radius - padding));
+    const capRight = Math.min(canvasWidth, Math.ceil(cx + radius + padding));
+    const capBottom = Math.min(canvasHeight, Math.ceil(cy + radius + padding));
+    const capturedWidth = capRight - capX;
+    const capturedHeight = capBottom - capY;
+
+    if (capturedWidth <= 0 || capturedHeight <= 0) return;
+
+    const imgData = ctx.getImageData(capX, capY, capturedWidth, capturedHeight);
+    if (!state.blurOriginalPixels || state.blurOriginalPixels.length !== imgData.data.length) {
+      state.blurOriginalPixels = new Uint8ClampedArray(imgData.data.length);
+      state.blurScratchPixels = new Uint8ClampedArray(imgData.data.length);
     }
-    
-    if (state.blurSrcCanvas.width !== capturedSize || state.blurSrcCanvas.height !== capturedSize) {
-      state.blurSrcCanvas.width = capturedSize;
-      state.blurSrcCanvas.height = capturedSize;
-    }
-    
-    const srcCtx = state.blurSrcCanvas.getContext('2d', { willReadFrequently: true });
-    
-    let sx = capX;
-    let sy = capY;
-    let sw = capturedSize;
-    let sh = capturedSize;
-    
-    let dx = 0;
-    let dy = 0;
-    let dw = capturedSize;
-    let dh = capturedSize;
-    
-    const canvasW = ctx.canvas.width;
-    const canvasH = ctx.canvas.height;
-    
-    if (sx < 0) { dx = -sx; dw += sx; sw += sx; sx = 0; }
-    if (sy < 0) { dy = -sy; dh += sy; sh += sy; sy = 0; }
-    if (sx + sw > canvasW) { const diff = (sx + sw) - canvasW; sw -= diff; dw -= diff; }
-    if (sy + sh > canvasH) { const diff = (sy + sh) - canvasH; sh -= diff; dh -= diff; }
-    
-    if (sw <= 0 || sh <= 0) return; // Completely off-screen
-    
-    srcCtx.clearRect(0, 0, capturedSize, capturedSize);
-    srcCtx.drawImage(ctx.canvas, sx, sy, sw, sh, dx, dy, dw, dh);
-    
-    const imgData = srcCtx.getImageData(0, 0, capturedSize, capturedSize);
-    const originalData = new Uint8ClampedArray(imgData.data);
-    
-    alphaWeightedBoxBlur(imgData, capturedSize, blurRadius);
+    const originalData = state.blurOriginalPixels;
+    originalData.set(imgData.data);
+
+    gaussianBlurImageData(imgData, capturedWidth, capturedHeight, blurRadius, state.blurScratchPixels);
     const blurredData = imgData.data;
-    
+
     const strength = (state.brushBlurStrength !== undefined ? state.brushBlurStrength : 0.25) * (state.opacity !== undefined ? state.opacity : 1.0);
     const hardness = state.brushHardness !== undefined ? state.brushHardness : 100;
-    
-    for (let y = 0; y < capturedSize; y++) {
-      for (let x = 0; x < capturedSize; x++) {
+
+    for (let y = 0; y < capturedHeight; y++) {
+      for (let x = 0; x < capturedWidth; x++) {
         const px = capX + x;
         const py = capY + y;
-        
+
         let isSelected = true;
         if (state.lassoActive && state.selectionMask) {
-          if (px >= 0 && py >= 0 && px < canvasW && py < canvasH) {
-            isSelected = state.selectionMask[px + py * canvasW] === 1;
-          } else {
-            isSelected = false;
-          }
+          isSelected = state.selectionMask[px + py * canvasWidth] === 1;
         }
-        
+
         let amount = 0;
         if (isSelected) {
           const d_x = px - cx + 0.5;
@@ -2281,8 +2322,8 @@ function drawBrushStamp(ctx, cx, cy, radius, size, brushCanvas) {
           const mask = brushMask(d_x, d_y, radius, hardness / 100);
           amount = mask * strength;
         }
-        
-        const idx = (x + y * capturedSize) * 4;
+
+        const idx = (x + y * capturedWidth) * 4;
         if (amount > 0) {
           blurredData[idx]   = originalData[idx]   * (1 - amount) + blurredData[idx]   * amount;
           blurredData[idx+1] = originalData[idx+1] * (1 - amount) + blurredData[idx+1] * amount;
@@ -2296,7 +2337,7 @@ function drawBrushStamp(ctx, cx, cy, radius, size, brushCanvas) {
         }
       }
     }
-    
+
     ctx.putImageData(imgData, capX, capY);
   } else if (state.tool === 'eraser' && drawEraserStamp(ctx, cx, cy, brushCanvas)) {
     return;
@@ -2306,9 +2347,7 @@ function drawBrushStamp(ctx, cx, cy, radius, size, brushCanvas) {
 }
 
 function drawSoftBrushStroke(ctx, x0, y0, x1, y1) {
-  if (!state.brushTipCanvas) {
-    updateBrushTip();
-  }
+  if (!(state.tool === 'brush' && state.isAltDrawing)) ensureBrushTip();
   const brushCanvas = state.brushTipCanvas;
   const size = state.brushSize;
   const radius = size / 2;
@@ -2325,9 +2364,10 @@ function drawSoftBrushStroke(ctx, x0, y0, x1, y1) {
   ctx.globalAlpha = state.opacity;
   
   if (steps === 0) {
-    drawBrushStamp(ctx, x0, y0, radius, size, brushCanvas);
+    drawBrushStamp(ctx, x1, y1, radius, size, brushCanvas);
   } else {
-    for (let i = 0; i <= steps; i++) {
+    // The segment's starting point was already stamped by the previous event.
+    for (let i = 1; i <= steps; i++) {
       const t = i / steps;
       const cx = x0 + dx * t;
       const cy = y0 + dy * t;
@@ -2338,9 +2378,7 @@ function drawSoftBrushStroke(ctx, x0, y0, x1, y1) {
 }
 
 function drawSoftBrushQuadratic(ctx, p0, cp, p1, size) {
-  if (!state.brushTipCanvas) {
-    updateBrushTip();
-  }
+  if (!(state.tool === 'brush' && state.isAltDrawing)) ensureBrushTip();
   const brushCanvas = state.brushTipCanvas;
   const radius = size / 2;
   
@@ -2358,9 +2396,9 @@ function drawSoftBrushQuadratic(ctx, p0, cp, p1, size) {
   ctx.globalAlpha = state.opacity;
   
   if (steps === 0) {
-    drawBrushStamp(ctx, p0.x, p0.y, radius, size, brushCanvas);
+    drawBrushStamp(ctx, p1.x, p1.y, radius, size, brushCanvas);
   } else {
-    for (let i = 0; i <= steps; i++) {
+    for (let i = 1; i <= steps; i++) {
       const t = i / steps;
       const mt = 1 - t;
       const cx = mt * mt * p0.x + 2 * mt * t * cp.x + t * t * p1.x;
@@ -2485,23 +2523,11 @@ function startStroke(x, y) {
     beginEraserStroke(lctx);
   }
 
-  if (state.tool === 'brush' && state.isAltDrawing) {
-    if (!state.strokeSourceCanvas) {
-      state.strokeSourceCanvas = document.createElement('canvas');
-    }
-    state.strokeSourceCanvas.width = canvasW;
-    state.strokeSourceCanvas.height = canvasH;
-    const sctx = state.strokeSourceCanvas.getContext('2d');
-    sctx.clearRect(0, 0, canvasW, canvasH);
-    sctx.drawImage(lctx.canvas, 0, 0);
-  }
   if (isAliased1px()) {
     lctx.fillStyle = getDrawColor();
     lctx.fillRect(Math.floor(x), Math.floor(y), 1, 1);
   } else if (state.tool === 'brush' || state.tool === 'eraser') {
-    if (!state.brushTipCanvas) {
-      updateBrushTip();
-    }
+    if (!(state.tool === 'brush' && state.isAltDrawing)) ensureBrushTip();
     const radius = state.brushSize / 2;
     const prevAlpha = lctx.globalAlpha;
     lctx.globalAlpha = state.opacity;
@@ -4044,7 +4070,6 @@ container.addEventListener('pointerup', e => {
     state.strokeLctx.restore();
     state.strokeLctx = null;
   }
-  state.strokeSourceCanvas = null; // Free snapshot canvas
   clearEraserStroke();
 
   // ── Lasso and Magic Wand pointerup ───────────────────────────────
@@ -4457,7 +4482,7 @@ document.addEventListener('keydown', e => {
 
   // [ / ] brush size
   if (e.key === '[') { setBrushSize(Math.max(1, state.brushSize - 2)); }
-  if (e.key === ']') { setBrushSize(Math.min(200, state.brushSize + 2)); }
+  if (e.key === ']') { setBrushSize(Math.min(MAX_TOOL_SIZE, state.brushSize + 2)); }
 
   // X = swap colors (only without Ctrl/Meta to avoid conflict with Ctrl+X cut)
   if ((e.key === 'x' || e.key === 'X') && !e.ctrlKey && !e.metaKey) swapColors();
@@ -4711,6 +4736,8 @@ container.addEventListener('drop', async (event) => {
 
 // ─── Tool Selection ──────────────────────────────────────────────
 const SIZED_TOOLS = ['pencil', 'brush', 'eraser', 'line', 'rect', 'circle', 'curve'];
+const MIN_TOOL_SIZE = 1;
+const MAX_TOOL_SIZE = 2048;
 
 function setTool(tool) {
   // Bake any floating lasso/magicwand selection before leaving selection tools
@@ -4741,12 +4768,14 @@ function setTool(tool) {
 
   // Restore the new tool's individual size
   if (SIZED_TOOLS.includes(tool)) {
-    const sz = state.toolSizes[tool];
+    const sz = Math.max(MIN_TOOL_SIZE, Math.min(MAX_TOOL_SIZE,
+      Math.round(Number(state.toolSizes[tool]) || MIN_TOOL_SIZE)));
+    state.toolSizes[tool] = sz;
     state.brushSize = sz;
     const slider = document.getElementById('brush-size');
-    const label  = document.getElementById('brush-size-val');
+    const sizeInput = document.getElementById('brush-size-input');
     if (slider) slider.value = sz;
-    if (label)  label.textContent = sz + 'px';
+    if (sizeInput) sizeInput.value = sz;
   }
 
   document.querySelectorAll('.tool-btn').forEach(btn => {
@@ -4814,7 +4843,7 @@ function setTool(tool) {
       if (hardnessOpts) hardnessOpts.style.display = 'flex';
       if (spacingOpts) spacingOpts.style.display = 'flex';
     }
-    if (tool === 'brush' || tool === 'eraser') updateBrushTip();
+    if (tool === 'brush' || tool === 'eraser') state.brushTipDirty = true;
   }
   updateBlurOptionVisibility();
 }
@@ -4850,29 +4879,47 @@ if (btnLassoFree && btnLassoRect) {
 
 // ─── Brush Size ──────────────────────────────────────────────────
 const brushSizeSlider = document.getElementById('brush-size');
-const brushSizeVal    = document.getElementById('brush-size-val');
+const brushSizeInput  = document.getElementById('brush-size-input');
 
 function setBrushSize(v) {
-  state.brushSize = v;
-  brushSizeSlider.value = v;
-  brushSizeVal.textContent = v + 'px';
+  const parsedValue = Number(v);
+  if (!Number.isFinite(parsedValue)) return;
+  const size = Math.max(MIN_TOOL_SIZE, Math.min(MAX_TOOL_SIZE, Math.round(parsedValue)));
+  state.brushSize = size;
+  brushSizeSlider.value = size;
+  brushSizeInput.value = size;
   // Persist the new size into the per-tool memory
   if (SIZED_TOOLS.includes(state.tool)) {
-    state.toolSizes[state.tool] = v;
+    state.toolSizes[state.tool] = size;
     // Synced tools: pencil, line, curve share the same size
     if (['pencil', 'line', 'curve'].includes(state.tool)) {
-      state.toolSizes['pencil'] = v;
-      state.toolSizes['line'] = v;
-      state.toolSizes['curve'] = v;
+      state.toolSizes['pencil'] = size;
+      state.toolSizes['line'] = size;
+      state.toolSizes['curve'] = size;
     }
   }
-  updateBrushTip();
+  if (state.tool === 'brush' || state.tool === 'eraser') state.brushTipDirty = true;
 }
 
 brushSizeSlider.addEventListener('input', () => setBrushSize(parseInt(brushSizeSlider.value)));
 // Return focus to document after slider use so keyboard shortcuts keep working
 brushSizeSlider.addEventListener('pointerup', () => brushSizeSlider.blur());
 brushSizeSlider.addEventListener('change',    () => brushSizeSlider.blur());
+
+brushSizeInput.addEventListener('input', () => {
+  if (brushSizeInput.value !== '') setBrushSize(brushSizeInput.value);
+});
+brushSizeInput.addEventListener('change', () => {
+  setBrushSize(brushSizeInput.value === '' ? state.brushSize : brushSizeInput.value);
+  brushSizeInput.blur();
+});
+brushSizeInput.addEventListener('keydown', event => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    setBrushSize(brushSizeInput.value === '' ? state.brushSize : brushSizeInput.value);
+    brushSizeInput.blur();
+  }
+});
 
 // ─── Opacity ─────────────────────────────────────────────────────
 const opacitySlider = document.getElementById('brush-opacity');
@@ -4893,7 +4940,7 @@ if (hardnessSlider && hardnessVal) {
   hardnessSlider.addEventListener('input', () => {
     state.brushHardness = parseInt(hardnessSlider.value);
     hardnessVal.textContent = hardnessSlider.value + '%';
-    updateBrushTip();
+    state.brushTipDirty = true;
   });
   hardnessSlider.addEventListener('pointerup', () => hardnessSlider.blur());
   hardnessSlider.addEventListener('change',    () => hardnessSlider.blur());
@@ -4961,7 +5008,7 @@ if (allLayersToggle) {
 const antiAliasToggle = document.getElementById('anti-alias-toggle');
 if (antiAliasToggle) {
   antiAliasToggle.addEventListener('change', () => {
-    updateBrushTip();
+    state.brushTipDirty = true;
     antiAliasToggle.blur();
   });
 }
@@ -4977,7 +5024,7 @@ function setFgColor(hex) {
   colorPicker.value = hex;
   fgSwatch.style.background = hex;
   colorHexLabel.textContent = hex.toUpperCase();
-  updateBrushTip();
+  state.brushTipDirty = true;
 }
 
 function setBgColor(hex) {

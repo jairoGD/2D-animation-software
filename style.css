@@ -142,6 +142,25 @@ body { font-family: var(--font); color: var(--text-primary); }
 }
 .tool-options input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.2); }
 .tool-options span { min-width: 34px; font-weight: 500; color: var(--text-primary); font-size: 11px; }
+.size-value-control {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.tool-options input[type=number] {
+  width: 66px;
+  height: 25px;
+  padding: 2px 5px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  outline: none;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font: 500 11px var(--font);
+  text-align: right;
+}
+.tool-options input[type=number]:focus { border-color: var(--accent); }
+.size-value-control span { min-width: 16px; }
 .zoom-indicator {
   font-size: 12px;
   font-weight: 600;

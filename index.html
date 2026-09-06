@@ -206,8 +206,12 @@
         <div class="tool-options" id="tool-options" style="gap: 16px;">
           <div id="size-option-container" style="display: flex; align-items: center; gap: 8px;">
             <label>Size:</label>
-            <input type="range" id="brush-size" min="1" max="100" value="1" />
-            <span id="brush-size-val">1px</span>
+            <input type="range" id="brush-size" min="1" max="2048" value="1" />
+            <div class="size-value-control">
+              <input type="number" id="brush-size-input" min="1" max="2048" step="1" value="1"
+                inputmode="numeric" aria-label="Tool size in pixels" />
+              <span>px</span>
+            </div>
           </div>
 
           <div id="opacity-option-container" style="display: flex; align-items: center; gap: 8px;">
