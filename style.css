@@ -142,7 +142,6 @@ body { font-family: var(--font); color: var(--text-primary); }
 }
 .tool-options input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.2); }
 .tool-options span { min-width: 34px; font-weight: 500; color: var(--text-primary); font-size: 11px; }
-
 .zoom-indicator {
   font-size: 12px;
   font-weight: 600;
@@ -398,15 +397,43 @@ body { font-family: var(--font); color: var(--text-primary); }
 #canvas-container.panning-active { cursor: grabbing !important; }
 #canvas-container.cursor-lasso { cursor: crosshair !important; }
 
-#main-canvas, #preview-canvas {
+#tile-canvas, #main-canvas, #preview-canvas, #selection-overlay {
   position: absolute;
   top: 0; left: 0;
   transform-origin: 0 0;
+}
+
+#tile-canvas, #main-canvas, #preview-canvas {
   image-rendering: pixelated;
   box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 20px 60px rgba(0,0,0,0.6);
 }
-#preview-canvas {
+#tile-canvas, #preview-canvas, #selection-overlay {
   pointer-events: none;
+}
+
+#tile-canvas {
+  display: none;
+  box-shadow: none;
+}
+
+#canvas-container.tile-view-active #main-canvas,
+#canvas-container.tile-view-active #preview-canvas {
+  box-shadow: none;
+}
+
+.view-menu-toggle .menu-check {
+  width: 12px;
+  color: var(--accent-2);
+  opacity: 0;
+}
+
+.view-menu-toggle.active .menu-check {
+  opacity: 1;
+}
+
+#selection-overlay {
+  overflow: visible;
+  mix-blend-mode: difference;
 }
 
 /* ─── Status Bar ────────────────────────────────────────────── */

@@ -20,6 +20,11 @@ const state = {
   brushBlurRadius: 5,
   brushBlurStrength: 0.25,
   brushTipCanvas: null,
+  brushTipImageData: null,
+  eraserOriginalPixels: null,
+  eraserCoverage: null,
+  eraserCoverageWidth: 0,
+  eraserCoverageHeight: 0,
   // Per-tool independent sizes (pencil / brush / eraser each remember their own)
   toolSizes: { pencil: 1, brush: 16, eraser: 24, line: 1, rect: 4, circle: 4, curve: 1 },
   opacity: 1,
@@ -46,6 +51,8 @@ const state = {
   lassoScaleX: 1,
   lassoScaleY: 1,
   lassoRotation: 0,
+  lassoScaleCorner: null,
+  lassoScalePivot: null,
   lassoDragStart: null,
   spaceDown: false,
   lastX: 0,
@@ -83,11 +90,17 @@ const state = {
   lassoCutPending: false, // true when the floating selection came from Ctrl+X
   isExporting: false,
   allLayersActive: false,
+  viewTile: false,
+  viewFlipX: false,
+  viewFlipY: false,
 };
 
 // ─── Canvas / Layer Setup ───────────────────────────────────────
+const tileCanvas    = document.getElementById('tile-canvas');
 const mainCanvas    = document.getElementById('main-canvas');
 const previewCanvas = document.getElementById('preview-canvas');
+const selectionOverlay = document.getElementById('selection-overlay');
+const tileCtx       = tileCanvas.getContext('2d');
 const displayCtx    = mainCanvas.getContext('2d');  // composite display
 const pctx          = previewCanvas.getContext('2d');
 const container     = document.getElementById('canvas-container');
@@ -223,6 +236,13 @@ function _lightenHex(hex, amount) {
   const g = Math.min(255, parseInt(hex.slice(3,5),16) + amount);
   const b = Math.min(255, parseInt(hex.slice(5,7),16) + amount);
   return `rgb(${r},${g},${b})`;
+}
+
+function selectionNeedsResampling() {
+  const epsilon = 1e-8;
+  return Math.abs(state.lassoRotation || 0) > epsilon ||
+    Math.abs((state.lassoScaleX ?? 1) - 1) > epsilon ||
+    Math.abs((state.lassoScaleY ?? 1) - 1) > epsilon;
 }
 
 function compositeAll() {
@@ -469,7 +489,7 @@ function compositeAll() {
         // Draw floating lasso selection if active on this layer
         if (state.lassoActive && state.lassoSelectionCanvas && l === layers[activeLayerIdx]) {
           displayCtx.save();
-          displayCtx.imageSmoothingEnabled = isAntiAliasingEnabled();
+          displayCtx.imageSmoothingEnabled = selectionNeedsResampling() && isAntiAliasingEnabled();
           const cx = state.lassoBoundingBox.x + state.lassoCurrentOffset.x + state.lassoBoundingBox.w / 2;
           const cy = state.lassoBoundingBox.y + state.lassoCurrentOffset.y + state.lassoBoundingBox.h / 2;
           displayCtx.translate(cx, cy);
@@ -540,7 +560,34 @@ function compositeAll() {
     }
   }
   displayCtx.globalAlpha = 1;
+  updateTileCanvas();
   updateLayerThumbs();
+}
+
+function updateTileCanvas() {
+  container.classList.toggle('tile-view-active', state.viewTile && !state.isExporting);
+  tileCanvas.style.display = state.viewTile && !state.isExporting ? 'block' : 'none';
+  if (!state.viewTile || state.isExporting) return;
+
+  const requiredW = Math.max(1, Math.ceil(container.clientWidth));
+  const requiredH = Math.max(1, Math.ceil(container.clientHeight));
+  if (tileCanvas.width !== requiredW || tileCanvas.height !== requiredH) {
+    tileCanvas.width = requiredW;
+    tileCanvas.height = requiredH;
+  } else {
+    tileCtx.clearRect(0, 0, requiredW, requiredH);
+  }
+
+  tileCtx.imageSmoothingEnabled = false;
+  const pattern = tileCtx.createPattern(mainCanvas, 'repeat');
+  if (!pattern) return;
+  const scaleX = state.zoom * (state.viewFlipX ? -1 : 1);
+  const scaleY = state.zoom * (state.viewFlipY ? -1 : 1);
+  const translateX = state.panX + (state.viewFlipX ? canvasW * state.zoom : 0);
+  const translateY = state.panY + (state.viewFlipY ? canvasH * state.zoom : 0);
+  pattern.setTransform(new DOMMatrix([scaleX, 0, 0, scaleY, translateX, translateY]));
+  tileCtx.fillStyle = pattern;
+  tileCtx.fillRect(0, 0, requiredW, requiredH);
 }
 
 // ─── Layers ──────────────────────────────────────────────────────
@@ -880,7 +927,7 @@ function setCurrentFrame(f) {
     const savedBBox = state.lassoBoundingBox;
     
     state.isPreservingSelection = true;
-    bakeLassoSelection();
+    bakeLassoSelection(false);
     
     state.currentFrame = targetFrame;
     
@@ -919,7 +966,7 @@ function changeActiveLayerPreservingSelection(newIdx, newFrame = null) {
     const savedBBox = state.lassoBoundingBox;
     
     state.isPreservingSelection = true;
-    bakeLassoSelection();
+    bakeLassoSelection(false);
     
     if (layerChanged) activeLayerIdx = newIdx;
     if (frameChanged) setCurrentFrame(newFrame);
@@ -1379,6 +1426,9 @@ function initCanvas(w, h, bgColor = '#ffffff') {
   canvasW = w; canvasH = h;
   mainCanvas.width    = w; mainCanvas.height   = h;
   previewCanvas.width = w; previewCanvas.height = h;
+  selectionOverlay.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  selectionOverlay.style.width = `${w}px`;
+  selectionOverlay.style.height = `${h}px`;
   state.bgColor = bgColor;
 
   // Reset layers to one fresh transparent layer
@@ -1407,9 +1457,16 @@ function centerCanvas() {
 }
 
 function applyTransform() {
-  const t = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
+  const scaleX = state.zoom * (state.viewFlipX ? -1 : 1);
+  const scaleY = state.zoom * (state.viewFlipY ? -1 : 1);
+  const translateX = state.panX + (state.viewFlipX ? canvasW * state.zoom : 0);
+  const translateY = state.panY + (state.viewFlipY ? canvasH * state.zoom : 0);
+  const t = `matrix(${scaleX}, 0, 0, ${scaleY}, ${translateX}, ${translateY})`;
   mainCanvas.style.transform   = t;
   previewCanvas.style.transform = t;
+  selectionOverlay.style.transform = t;
+  tileCanvas.style.transform = 'none';
+  updateTileCanvas();
   
   // Real-time sync of video layers during pan/zoom
   for (const l of layers) {
@@ -1422,11 +1479,15 @@ function applyTransform() {
     Math.round(state.zoom * 100) + '%';
 }
 
+window.addEventListener('resize', updateTileCanvas);
+
 // ─── Coordinate Helpers ──────────────────────────────────────────
 function clientToCanvas(clientX, clientY) {
   const rect = container.getBoundingClientRect();
   let x = (clientX - rect.left - state.panX) / state.zoom;
   let y = (clientY - rect.top  - state.panY) / state.zoom;
+  if (state.viewFlipX) x = canvasW - x;
+  if (state.viewFlipY) y = canvasH - y;
   
   const aaCheckbox = document.getElementById('anti-alias-toggle');
   const antiAlias = aaCheckbox ? aaCheckbox.checked : true;
@@ -1477,6 +1538,73 @@ function snapshotLayers() {
       })
     };
   });
+}
+
+function snapshotSelection() {
+  if (!state.lassoActive) return { active: false };
+
+  const snapshotCanvas = canvas => canvas ? {
+    width: canvas.width,
+    height: canvas.height,
+    data: canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height)
+  } : null;
+
+  return {
+    active: true,
+    path: (state.lassoPath || []).map(point => ({ ...point })),
+    paths: (state.lassoPaths || []).map(path => path.map(point => ({ ...point }))),
+    selectionCanvas: snapshotCanvas(state.lassoSelectionCanvas),
+    maskCanvas: snapshotCanvas(state.lassoMaskCanvas),
+    boundingBox: state.lassoBoundingBox ? { ...state.lassoBoundingBox } : null,
+    currentOffset: { ...state.lassoCurrentOffset },
+    prevOffset: { ...state.lassoPrevOffset },
+    startOffset: { ...state.lassoStartOffset },
+    scaleX: state.lassoScaleX,
+    scaleY: state.lassoScaleY,
+    rotation: state.lassoRotation,
+    transformMode: state.lassoTransformMode,
+    selectionMask: state.selectionMask ? new Uint8Array(state.selectionMask) : null
+  };
+}
+
+function restoreSelectionSnapshot(selection) {
+  _clearLassoStateOnly();
+  const transformButton = document.getElementById('btn-lasso-transform');
+  if (transformButton) {
+    transformButton.classList.add('hidden');
+    transformButton.classList.remove('active');
+  }
+  if (!selection || !selection.active) return;
+
+  const restoreCanvas = snapshot => {
+    if (!snapshot) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = snapshot.width;
+    canvas.height = snapshot.height;
+    canvas.getContext('2d').putImageData(snapshot.data, 0, 0);
+    return canvas;
+  };
+
+  state.lassoActive = true;
+  state.lassoPath = selection.path.map(point => ({ ...point }));
+  state.lassoPaths = selection.paths.map(path => path.map(point => ({ ...point })));
+  state.lassoSelectionCanvas = restoreCanvas(selection.selectionCanvas);
+  state.lassoMaskCanvas = restoreCanvas(selection.maskCanvas);
+  state.lassoBoundingBox = selection.boundingBox ? { ...selection.boundingBox } : null;
+  state.lassoCurrentOffset = { ...selection.currentOffset };
+  state.lassoPrevOffset = { ...selection.prevOffset };
+  state.lassoStartOffset = { ...selection.startOffset };
+  state.lassoScaleX = selection.scaleX;
+  state.lassoScaleY = selection.scaleY;
+  state.lassoRotation = selection.rotation;
+  state.lassoTransformMode = selection.transformMode;
+  state.selectionMask = selection.selectionMask ? new Uint8Array(selection.selectionMask) : null;
+
+  if (transformButton) {
+    transformButton.classList.remove('hidden');
+    transformButton.classList.toggle('active', state.lassoTransformMode);
+  }
+  drawLassoSelectionOutline();
 }
 
 function restoreSnapshot(snap) {
@@ -1569,6 +1697,7 @@ function restoreSnapshot(snap) {
   });
   
   activeLayerIdx = Math.max(0, Math.min(currentActiveIdx, layers.length - 1));
+  if (!Array.isArray(snap)) restoreSelectionSnapshot(snap.selection);
   renderLayerPanel();
   renderTimeline();
   compositeAll();
@@ -1577,7 +1706,8 @@ function restoreSnapshot(snap) {
 function saveHistory() {
   state.history.push({
     layers: snapshotLayers(),
-    activeLayerIdx: activeLayerIdx
+    activeLayerIdx: activeLayerIdx,
+    selection: snapshotSelection()
   });
   if (state.history.length > state.maxHistory) state.history.shift();
   state.redoStack = [];
@@ -1605,7 +1735,7 @@ function discardLassoSelection() {
       markActiveFrameAsKeyframe();
       lctx.save();
       lctx.globalCompositeOperation = 'source-over';
-      lctx.imageSmoothingEnabled = isAntiAliasingEnabled();
+      lctx.imageSmoothingEnabled = selectionNeedsResampling() && isAntiAliasingEnabled();
       const cx = state.lassoBoundingBox.x + (state.lassoCurrentOffset.x||0) + state.lassoBoundingBox.w / 2;
       const cy = state.lassoBoundingBox.y + (state.lassoCurrentOffset.y||0) + state.lassoBoundingBox.h / 2;
       lctx.translate(cx, cy);
@@ -1635,6 +1765,7 @@ function discardLassoSelection() {
   state.lassoTransformMode   = false;
   state.selectionMask        = null;
   pctx.clearRect(0, 0, canvasW, canvasH);
+  selectionOverlay.replaceChildren();
 }
 
 // Used ONLY by undo/redo — clears lasso state WITHOUT baking floating pixels.
@@ -1656,31 +1787,15 @@ function _clearLassoStateOnly() {
   state.lassoTransformMode   = false;
   state.selectionMask        = null;
   pctx.clearRect(0, 0, canvasW, canvasH);
+  selectionOverlay.replaceChildren();
 }
 
 function undo() {
   if (state.history.length < 2) return;
 
-  if (state.lassoActive) {
-    if (state.lassoSelectionCanvas) {
-      // Floating mode: pixels were extracted to a canvas.
-      // Clear ALL lasso state — the snapshot will restore the correct pixel data.
-      _clearLassoStateOnly();
-    }
-    // Stencil mode (lassoSelectionCanvas == null): the selection is just a
-    // clipping mask while painting. Keep lasso state; only restore pixel data.
-    // No clear needed — the selection outline and mask remain active.
-  }
-
   state.shiftAnchor = null;
-  clearPreview();
   state.redoStack.push(state.history.pop());
   restoreSnapshot(state.history[state.history.length - 1]);
-
-  // Re-draw the selection outline after snapshot restore (stencil mode)
-  if (state.lassoActive && !state.lassoSelectionCanvas) {
-    drawLassoSelectionOutline();
-  }
 
   flashUndoRedo('undo');
 }
@@ -1688,24 +1803,10 @@ function undo() {
 function redo() {
   if (!state.redoStack.length) return;
 
-  if (state.lassoActive) {
-    if (state.lassoSelectionCanvas) {
-      // Floating mode: clear lasso state so the snapshot can restore correctly.
-      _clearLassoStateOnly();
-    }
-    // Stencil mode: keep the selection active, just restore the pixel data.
-  }
-
   state.shiftAnchor = null;
-  clearPreview();
   const snap = state.redoStack.pop();
   state.history.push(snap);
   restoreSnapshot(snap);
-
-  // Re-draw the selection outline after snapshot restore (stencil mode)
-  if (state.lassoActive && !state.lassoSelectionCanvas) {
-    drawLassoSelectionOutline();
-  }
 
   flashUndoRedo('redo');
 }
@@ -1788,7 +1889,7 @@ function bakeFloatingSelectionOnly() {
     markActiveFrameAsKeyframe();
     lctx.save();
     lctx.globalCompositeOperation = 'source-over';
-    lctx.imageSmoothingEnabled = isAntiAliasingEnabled();
+    lctx.imageSmoothingEnabled = selectionNeedsResampling() && isAntiAliasingEnabled();
     
     const cx = state.lassoBoundingBox.x + state.lassoCurrentOffset.x + state.lassoBoundingBox.w / 2;
     const cy = state.lassoBoundingBox.y + state.lassoCurrentOffset.y + state.lassoBoundingBox.h / 2;
@@ -1940,6 +2041,7 @@ function updateBrushTip() {
     }
   }
   ctx.putImageData(imgData, 0, 0);
+  state.brushTipImageData = imgData;
 }
 
 function alphaWeightedBoxBlur(imgData, size, radius) {
@@ -2024,8 +2126,73 @@ function brushMask(dx, dy, radius, hardness) {
 
   const feather = (t - hardness) / (1 - hardness);
 
-  // smoothstep falloff
+  // Smooth transition across the brush's soft edge.
   return 1 - feather * feather * (3 - 2 * feather);
+}
+
+function beginEraserStroke(ctx) {
+  const source = ctx.getImageData(0, 0, ctx.canvas.width, ctx.canvas.height);
+  state.eraserOriginalPixels = new Uint8ClampedArray(source.data);
+  state.eraserCoverage = new Uint8ClampedArray(ctx.canvas.width * ctx.canvas.height);
+  state.eraserCoverageWidth = ctx.canvas.width;
+  state.eraserCoverageHeight = ctx.canvas.height;
+}
+
+function clearEraserStroke() {
+  state.eraserOriginalPixels = null;
+  state.eraserCoverage = null;
+  state.eraserCoverageWidth = 0;
+  state.eraserCoverageHeight = 0;
+}
+
+function drawEraserStamp(ctx, cx, cy, brushCanvas) {
+  if (!state.eraserCoverage || !state.eraserOriginalPixels) return false;
+
+  const tipWidth = brushCanvas.width;
+  const tipHeight = brushCanvas.height;
+  const startX = Math.round(cx - tipWidth / 2);
+  const startY = Math.round(cy - tipHeight / 2);
+  const minX = Math.max(0, startX);
+  const minY = Math.max(0, startY);
+  const maxX = Math.min(state.eraserCoverageWidth, startX + tipWidth);
+  const maxY = Math.min(state.eraserCoverageHeight, startY + tipHeight);
+  if (minX >= maxX || minY >= maxY) return true;
+
+  const tipData = state.brushTipImageData ||
+    brushCanvas.getContext('2d').getImageData(0, 0, tipWidth, tipHeight);
+  const dirtyWidth = maxX - minX;
+  const dirtyHeight = maxY - minY;
+  const output = ctx.getImageData(minX, minY, dirtyWidth, dirtyHeight);
+  const outputPixels = output.data;
+  const opacity = Math.max(0, Math.min(1, state.opacity ?? 1));
+
+  for (let y = minY; y < maxY; y++) {
+    for (let x = minX; x < maxX; x++) {
+      const canvasPixel = x + y * state.eraserCoverageWidth;
+      if (state.lassoActive && state.selectionMask && state.selectionMask[canvasPixel] !== 1) continue;
+
+      const tipX = x - startX;
+      const tipY = y - startY;
+      const tipIndex = (tipX + tipY * tipWidth) * 4;
+      const tipCoverage = tipData.data[tipIndex + 3];
+      if (tipCoverage > state.eraserCoverage[canvasPixel]) {
+        state.eraserCoverage[canvasPixel] = tipCoverage;
+      }
+
+      const eraseAmount = (state.eraserCoverage[canvasPixel] / 255) * opacity;
+      const sourceIndex = canvasPixel * 4;
+      const outputIndex = ((x - minX) + (y - minY) * dirtyWidth) * 4;
+      outputPixels[outputIndex] = state.eraserOriginalPixels[sourceIndex];
+      outputPixels[outputIndex + 1] = state.eraserOriginalPixels[sourceIndex + 1];
+      outputPixels[outputIndex + 2] = state.eraserOriginalPixels[sourceIndex + 2];
+      outputPixels[outputIndex + 3] = Math.round(
+        state.eraserOriginalPixels[sourceIndex + 3] * (1 - eraseAmount)
+      );
+    }
+  }
+
+  ctx.putImageData(output, minX, minY);
+  return true;
 }
 
 function drawBrushStamp(ctx, cx, cy, radius, size, brushCanvas) {
@@ -2131,6 +2298,8 @@ function drawBrushStamp(ctx, cx, cy, radius, size, brushCanvas) {
     }
     
     ctx.putImageData(imgData, capX, capY);
+  } else if (state.tool === 'eraser' && drawEraserStamp(ctx, cx, cy, brushCanvas)) {
+    return;
   } else {
     ctx.drawImage(brushCanvas, rx, ry);
   }
@@ -2206,8 +2375,8 @@ function configCtx(context, tool) {
   context.globalCompositeOperation = tool === 'eraser' ? 'destination-out' : 'source-over';
   context.lineCap     = 'round';
   context.lineJoin    = 'round';
-  context.strokeStyle = tool === 'eraser' ? 'rgba(0,0,0,1)' : getDrawColor();
-  context.fillStyle   = getDrawColor();
+  context.strokeStyle = tool === 'eraser' ? `rgba(0,0,0,${state.opacity})` : getDrawColor();
+  context.fillStyle   = tool === 'eraser' ? `rgba(0,0,0,${state.opacity})` : getDrawColor();
   context.globalAlpha = 1;
 
   const aaCheckbox = document.getElementById('anti-alias-toggle');
@@ -2310,6 +2479,11 @@ function startStroke(x, y) {
   applySelectionClip(lctx);
   state.strokeLctx = lctx;
   configCtx(lctx, state.tool);
+  clearEraserStroke();
+
+  if (state.tool === 'eraser' && !isAliased1px()) {
+    beginEraserStroke(lctx);
+  }
 
   if (state.tool === 'brush' && state.isAltDrawing) {
     if (!state.strokeSourceCanvas) {
@@ -2324,7 +2498,7 @@ function startStroke(x, y) {
   if (isAliased1px()) {
     lctx.fillStyle = getDrawColor();
     lctx.fillRect(Math.floor(x), Math.floor(y), 1, 1);
-  } else if (state.tool === 'brush') {
+  } else if (state.tool === 'brush' || state.tool === 'eraser') {
     if (!state.brushTipCanvas) {
       updateBrushTip();
     }
@@ -2349,7 +2523,7 @@ function continueStroke(x, y) {
   configCtx(lctx, state.tool);
   if (isAliased1px()) {
     drawBresenhamLine(lctx, state.lastDrawX, state.lastDrawY, x, y);
-  } else if (state.tool === 'brush') {
+  } else if (state.tool === 'brush' || state.tool === 'eraser') {
     drawSoftBrushStroke(lctx, state.lastDrawX, state.lastDrawY, x, y);
   } else {
     lctx.lineTo(x, y); lctx.stroke();
@@ -2368,49 +2542,47 @@ function clearPreview() {
     drawLassoSelectionOutline();
   } else {
     previewCanvas.style.mixBlendMode = 'normal';
+    selectionOverlay.replaceChildren();
   }
 }
 
 // ─── Lasso Selection Helpers ─────────────────────────────────────
-function drawAnimatedBresenhamPath(ctx, path, ox, oy) {
-  let pixelCount = 0;
-  ctx.fillStyle = '#ffffff';
-  const drawState = state.lassoAnimState;
-  
-  for (let i = 0; i < path.length - 1; i++) {
-    const p0 = path[i];
-    const p1 = path[i+1];
-    
-    let x0 = Math.floor(p0.x + ox);
-    let y0 = Math.floor(p0.y + oy);
-    const x1 = Math.floor(p1.x + ox);
-    const y1 = Math.floor(p1.y + oy);
-    
-    const dx = Math.abs(x1 - x0);
-    const dy = -Math.abs(y1 - y0);
-    const sx = x0 < x1 ? 1 : -1;
-    const sy = y0 < y1 ? 1 : -1;
-    let err = dx + dy;
-    
-    let isFirstPoint = true;
+function renderSelectionOverlay(pathGroups) {
+  selectionOverlay.replaceChildren();
+  if (!pathGroups || pathGroups.length === 0) return;
 
-    while (true) {
-      // Avoid double-drawing the endpoint of the previous segment
-      if (!(i > 0 && isFirstPoint)) {
-        const dash = (pixelCount % 8) < 4;
-        if (drawState ? !dash : dash) {
-          ctx.fillRect(x0, y0, 1, 1);
-        }
-        pixelCount++;
-      }
-      isFirstPoint = false;
-      
-      if (x0 === x1 && y0 === y1) break;
-      const e2 = 2 * err;
-      if (e2 >= dy) { err += dy; x0 += sx; }
-      if (e2 <= dx) { err += dx; y0 += sy; }
-    }
-  }
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const dashOffset = state.lassoAnimState ? 0 : 6;
+  pathGroups.forEach(({ paths, ox = 0, oy = 0, transform = null }) => {
+    const group = document.createElementNS(svgNS, 'g');
+    if (transform) group.setAttribute('transform', transform);
+
+    paths.forEach(path => {
+      if (!path || path.length < 2) return;
+      const outline = document.createElementNS(svgNS, 'path');
+      const d = path.map((point, index) =>
+        `${index === 0 ? 'M' : 'L'} ${point.x + ox} ${point.y + oy}`
+      ).join(' ') + ' Z';
+      outline.setAttribute('d', d);
+      outline.setAttribute('fill', 'none');
+      outline.setAttribute('stroke', '#ffffff');
+      outline.setAttribute('stroke-width', '1.5');
+      outline.setAttribute('stroke-dasharray', '6 6');
+      outline.setAttribute('stroke-dashoffset', String(dashOffset));
+      outline.setAttribute('vector-effect', 'non-scaling-stroke');
+      outline.setAttribute('shape-rendering', 'geometricPrecision');
+      group.appendChild(outline);
+    });
+    selectionOverlay.appendChild(group);
+  });
+}
+
+function getSelectionSvgTransform(ox, oy) {
+  if (!state.lassoBoundingBox) return null;
+  const cx = state.lassoBoundingBox.x + ox + state.lassoBoundingBox.w / 2;
+  const cy = state.lassoBoundingBox.y + oy + state.lassoBoundingBox.h / 2;
+  const degrees = (state.lassoRotation || 0) * 180 / Math.PI;
+  return `translate(${cx} ${cy}) rotate(${degrees}) scale(${state.lassoScaleX || 1} ${state.lassoScaleY || 1}) translate(${-cx} ${-cy})`;
 }
 
 function drawLassoPreview() {
@@ -2419,16 +2591,18 @@ function drawLassoPreview() {
   pctx.save();
   pctx.filter = 'none';
   pctx.imageSmoothingEnabled = false;
+  const overlayGroups = [];
   // Draw committed selection outline while user is drawing a new modifier path
   if (state.lassoActive && state.lassoPaths && state.lassoPaths.length > 0) {
     const ox = state.lassoCurrentOffset.x;
     const oy = state.lassoCurrentOffset.y;
-    state.lassoPaths.forEach(path => drawAnimatedBresenhamPath(pctx, path, ox, oy));
+    overlayGroups.push({ paths: state.lassoPaths, ox, oy, transform: getSelectionSvgTransform(ox, oy) });
   }
   // Draw the live new path being drawn
   if (state.lassoPath && state.lassoPath.length >= 2) {
-    drawAnimatedBresenhamPath(pctx, state.lassoPath, 0, 0);
+    overlayGroups.push({ paths: [state.lassoPath] });
   }
+  renderSelectionOverlay(overlayGroups);
   pctx.restore();
 }
 
@@ -2462,10 +2636,14 @@ function drawLassoSelectionOutline() {
     pctx.translate(-cx, -cy);
   }
 
-  // Draw animated outlines
-  paths.forEach(path => {
-    drawAnimatedBresenhamPath(pctx, path, ox, oy);
-  });
+  // The selection outline lives in a vector overlay so its stroke and dash
+  // remain a fixed screen size instead of becoming artwork pixels on zoom.
+  renderSelectionOverlay([{
+    paths,
+    ox,
+    oy,
+    transform: getSelectionSvgTransform(ox, oy)
+  }]);
 
   // Bounding box with handles for Transform Mode
   if (state.lassoTransformMode && state.lassoBoundingBox) {
@@ -2529,7 +2707,7 @@ function drawLassoSelectionOutline() {
   pctx.restore();
 }
 
-function extractLassoSelection(providedMask = null, forceKeepFloating = false) {
+function extractLassoSelection(providedMask = null, forceKeepFloating = false, extractPixels = true) {
   const lctx = getLCtx();
   if (!lctx) return;
 
@@ -2571,7 +2749,9 @@ function extractLassoSelection(providedMask = null, forceKeepFloating = false) {
     state.lassoSelectionCanvas = null;
     state.lassoMaskCanvas = null;
     state.lassoBoundingBox = null;
+    state.selectionMask = null;
     pctx.clearRect(0, 0, canvasW, canvasH);
+    selectionOverlay.replaceChildren();
     return;
   }
 
@@ -2629,6 +2809,18 @@ function extractLassoSelection(providedMask = null, forceKeepFloating = false) {
 
   const maskData = maskCtx.getImageData(0, 0, w, h).data;
 
+  state.lassoMaskCanvas = maskCanvas;
+  updateSelectionMask(providedMask);
+
+  // A newly-created selection is only a stencil. Keeping pixels in their
+  // original layer makes selection itself completely non-destructive and
+  // preserves layer opacity/blend rendering exactly.
+  if (!extractPixels) {
+    state.lassoSelectionCanvas = null;
+    compositeAll();
+    return false;
+  }
+
   const layerData = lctx.getImageData(minX, minY, w, h);
   const layerPixels = layerData.data;
 
@@ -2659,17 +2851,11 @@ function extractLassoSelection(providedMask = null, forceKeepFloating = false) {
     lctx.putImageData(layerData, minX, minY);
   }
   state.lassoSelectionCanvas = selCanvas;
-  state.lassoMaskCanvas = maskCanvas;
-
-  updateSelectionMask(providedMask);
 
   if (state.tool !== 'lasso' && state.tool !== 'magicwand' && !forceKeepFloating) {
     bakeFloatingSelectionOnly();
   } else {
     compositeAll();
-    if (modified) {
-      saveHistory();
-    }
   }
   return modified;
 }
@@ -2829,7 +3015,7 @@ function magicWandSelect(sx, sy, isShift, isAlt) {
   const existingMask = getExistingSelectionMask();
   if (hasSelection) {
     // Bake the selection back to the layer before flood fill
-    bakeLassoSelection();
+    bakeLassoSelection(false);
   }
 
   const imgData = (state.allLayersActive) ? getCombinedLayersImageData() : lctx.getImageData(0, 0, canvasW, canvasH);
@@ -2902,14 +3088,14 @@ function magicWandSelect(sx, sy, isShift, isAlt) {
     state.lassoPaths = newPaths;
     state.lassoPath = newPaths[0]; // fallback
     state.lassoActive = true;
-    const modified = extractLassoSelection(combinedMask);
+    extractLassoSelection(combinedMask, false, false);
     drawLassoSelectionOutline();
     compositeAll();
-    if (modified) {
-      saveHistory();
-    }
+    saveHistory();
   } else {
+    _clearLassoStateOnly();
     compositeAll();
+    saveHistory();
   }
 }
 
@@ -2924,7 +3110,7 @@ function lassoPathSelect(closedPath, isShift, isAlt) {
   
   if (hasSelection) {
     // Bake selection back to layer before working on new path
-    bakeLassoSelection();
+    bakeLassoSelection(false);
   }
 
   // Build new mask from the drawn polygon (same fill approach as original extractLassoSelection)
@@ -2957,14 +3143,14 @@ function lassoPathSelect(closedPath, isShift, isAlt) {
     state.lassoPaths = newPaths;
     state.lassoPath = newPaths[0];
     state.lassoActive = true;
-    const modified = extractLassoSelection(combinedMask);
+    extractLassoSelection(combinedMask);
     drawLassoSelectionOutline();
     compositeAll();
-    if (modified) {
-      saveHistory();
-    }
+    saveHistory();
   } else {
+    _clearLassoStateOnly();
     compositeAll();
+    saveHistory();
   }
 }
 
@@ -3012,7 +3198,7 @@ function invertSelection() {
   if (state.lassoActive) {
     existingMask = getExistingSelectionMask();
     if (state.tool === 'lasso' || state.tool === 'magicwand') {
-      bakeLassoSelection();
+      bakeLassoSelection(false);
     } else {
       bakeFloatingSelectionOnly();
       state.lassoActive = false;
@@ -3033,6 +3219,7 @@ function invertSelection() {
     extractLassoSelection(invertedMask);
     drawLassoSelectionOutline();
     compositeAll();
+    saveHistory();
   } else {
     discardLassoSelection();
     compositeAll();
@@ -3040,14 +3227,14 @@ function invertSelection() {
   }
 }
 
-function bakeLassoSelection() {
+function bakeLassoSelection(recordHistory = true) {
   if (!state.lassoActive || !state.lassoSelectionCanvas) return;
   const lctx = getLCtx();
   if (lctx) {
     markActiveFrameAsKeyframe();
     lctx.save();
     lctx.globalCompositeOperation = 'source-over';
-    lctx.imageSmoothingEnabled = isAntiAliasingEnabled();
+    lctx.imageSmoothingEnabled = selectionNeedsResampling() && isAntiAliasingEnabled();
     
     const cx = state.lassoBoundingBox.x + state.lassoCurrentOffset.x + state.lassoBoundingBox.w / 2;
     const cy = state.lassoBoundingBox.y + state.lassoCurrentOffset.y + state.lassoBoundingBox.h / 2;
@@ -3085,10 +3272,11 @@ function bakeLassoSelection() {
   }
   
   pctx.clearRect(0, 0, canvasW, canvasH);
+  selectionOverlay.replaceChildren();
   
   if (lctx) {
     compositeAll();
-    saveHistory();
+    if (recordHistory) saveHistory();
   }
 }
 
@@ -3349,6 +3537,7 @@ container.addEventListener('pointerdown', e => {
   if (e.button !== 0 && e.button !== 1) return;
   e.preventDefault();
   state.isAltDrawing = e.altKey;
+  updateBlurOptionVisibility();
 
   if (state.isPlaying) {
     pause();
@@ -3440,11 +3629,17 @@ container.addEventListener('pointerdown', e => {
       const rotY = -halfH - 20 / state.zoom;
       const distToRot = Math.sqrt(Math.pow(localX, 2) + Math.pow(localY - rotY, 2));
       
-      const distToTL = Math.sqrt(Math.pow(localX - (-halfW), 2) + Math.pow(localY - (-halfH), 2));
-      const distToTR = Math.sqrt(Math.pow(localX - halfW, 2) + Math.pow(localY - (-halfH), 2));
-      const distToBL = Math.sqrt(Math.pow(localX - (-halfW), 2) + Math.pow(localY - halfH, 2));
-      const distToBR = Math.sqrt(Math.pow(localX - halfW, 2) + Math.pow(localY - halfH, 2));
-      const minDistToScale = Math.min(distToTL, distToTR, distToBL, distToBR);
+      const scaleCorners = [
+        { x: -halfW, y: -halfH, signX: -1, signY: -1 },
+        { x:  halfW, y: -halfH, signX:  1, signY: -1 },
+        { x: -halfW, y:  halfH, signX: -1, signY:  1 },
+        { x:  halfW, y:  halfH, signX:  1, signY:  1 }
+      ];
+      const cornerDistances = scaleCorners.map(corner =>
+        Math.hypot(localX - corner.x, localY - corner.y)
+      );
+      const scaleCornerIndex = cornerDistances.indexOf(Math.min(...cornerDistances));
+      const minDistToScale = cornerDistances[scaleCornerIndex];
 
       // We use average scale for hit tolerance to keep it roughly the same size visually
       const hitTolerance = 12 / (state.zoom * ((sX + sY) / 2));
@@ -3472,6 +3667,24 @@ container.addEventListener('pointerdown', e => {
          state.lassoBaseScaleX = state.lassoScaleX || 1;
          state.lassoBaseScaleY = state.lassoScaleY || 1;
          state.lassoBaseScale = state.lassoScaleX || 1;
+         state.lassoBaseCenter = { x: cx, y: cy };
+         state.lassoStartOffset = { ...state.lassoCurrentOffset };
+         state.lassoScaleCorner = scaleCorners[scaleCornerIndex];
+
+         // Fixed pivot used by Ctrl-scaling: the corner diagonally opposite
+         // the handle being dragged, including the current rotation/scale.
+         const corner = state.lassoScaleCorner;
+         const oppositeLocalX = -corner.signX * halfW * state.lassoBaseScaleX;
+         const oppositeLocalY = -corner.signY * halfH * state.lassoBaseScaleY;
+         const rotation = state.lassoRotation || 0;
+         state.lassoScalePivot = {
+           x: cx + oppositeLocalX * Math.cos(rotation) - oppositeLocalY * Math.sin(rotation),
+           y: cy + oppositeLocalX * Math.sin(rotation) + oppositeLocalY * Math.cos(rotation)
+         };
+         state.lassoStartPivotDistance = Math.hypot(
+           x - state.lassoScalePivot.x,
+           y - state.lassoScalePivot.y
+         );
          
          container.setPointerCapture(e.pointerId);
          return;
@@ -3489,6 +3702,9 @@ container.addEventListener('pointerdown', e => {
     if (e.ctrlKey) {
       // Move mode: drag the floating selection
       if (state.lassoActive) {
+        if (!state.lassoSelectionCanvas) {
+          extractLassoSelection(state.selectionMask, true, true);
+        }
         state.isDrawing = true;
         state.lassoDragged = true;
         state.lassoDragAction = 'move';
@@ -3506,7 +3722,7 @@ container.addEventListener('pointerdown', e => {
         state.lassoAltKey   = e.altKey  && state.lassoActive;
         // Only bake if starting a completely new selection (no modifier)
         if (!state.lassoShiftKey && !state.lassoAltKey && state.lassoActive) {
-          bakeLassoSelection();
+          bakeLassoSelection(false);
         }
         state.isDrawing = true;
         state.lassoDragged = false;
@@ -3537,6 +3753,10 @@ container.addEventListener('pointerdown', e => {
     configCtx(lctx, state.tool);
     if (isAliased1px()) {
       drawBresenhamLine(lctx, state.shiftAnchor.x, state.shiftAnchor.y, x, y);
+    } else if (state.tool === 'eraser') {
+      beginEraserStroke(lctx);
+      drawSoftBrushStroke(lctx, state.shiftAnchor.x, state.shiftAnchor.y, x, y);
+      clearEraserStroke();
     } else {
       lctx.beginPath();
       lctx.moveTo(state.shiftAnchor.x, state.shiftAnchor.y);
@@ -3588,7 +3808,9 @@ container.addEventListener('pointerdown', e => {
 container.addEventListener('pointermove', e => {
   const {x, y} = clientToCanvas(e.clientX, e.clientY);
   if (state.isDrawing) {
+    const altChanged = state.isAltDrawing !== e.altKey;
     state.isAltDrawing = e.altKey;
+    if (altChanged) updateBlurOptionVisibility();
   }
 
   // Update coordinate display
@@ -3632,8 +3854,8 @@ container.addEventListener('pointermove', e => {
           const dx = x - state.lassoDragStart.x;
           const dy = y - state.lassoDragStart.y;
           state.lassoCurrentOffset = {
-            x: state.lassoStartOffset.x + dx,
-            y: state.lassoStartOffset.y + dy,
+            x: Math.round(state.lassoStartOffset.x + dx),
+            y: Math.round(state.lassoStartOffset.y + dy),
           };
         } else if (state.lassoDragAction === 'rotate') {
           const cx = state.lassoBoundingBox.x + state.lassoCurrentOffset.x + state.lassoBoundingBox.w / 2;
@@ -3641,29 +3863,72 @@ container.addEventListener('pointermove', e => {
           const currentAngle = Math.atan2(y - cy, x - cx);
           state.lassoRotation = state.lassoBaseRotation + (currentAngle - state.lassoStartAngle);
         } else if (state.lassoDragAction === 'scale') {
-          const cx = state.lassoBoundingBox.x + state.lassoCurrentOffset.x + state.lassoBoundingBox.w / 2;
-          const cy = state.lassoBoundingBox.y + state.lassoCurrentOffset.y + state.lassoBoundingBox.h / 2;
-          
-          const dx = x - cx;
-          const dy = y - cy;
-          
-          if (e.shiftKey) {
-            const dist = Math.sqrt(dx*dx + dy*dy);
-            if (state.lassoStartDist > 0) {
-              const s = state.lassoBaseScale * (dist / state.lassoStartDist);
-              state.lassoScaleX = s;
-              state.lassoScaleY = s;
+          const rotation = state.lassoRotation || 0;
+          const cosR = Math.cos(rotation);
+          const sinR = Math.sin(rotation);
+          const halfW = state.lassoBoundingBox.w / 2;
+          const halfH = state.lassoBoundingBox.h / 2;
+
+          if (e.ctrlKey && state.lassoScaleCorner && state.lassoScalePivot) {
+            const pivot = state.lassoScalePivot;
+            const corner = state.lassoScaleCorner;
+            const pivotDx = x - pivot.x;
+            const pivotDy = y - pivot.y;
+            const localDx = pivotDx * cosR + pivotDy * sinR;
+            const localDy = -pivotDx * sinR + pivotDy * cosR;
+
+            if (e.shiftKey) {
+              const distance = Math.hypot(pivotDx, pivotDy);
+              if (state.lassoStartPivotDistance > 0) {
+                const uniformScale = Math.max(0.01,
+                  state.lassoBaseScale * (distance / state.lassoStartPivotDistance));
+                state.lassoScaleX = uniformScale;
+                state.lassoScaleY = uniformScale;
+              }
+            } else {
+              if (halfW > 0) {
+                state.lassoScaleX = Math.max(0.01, corner.signX * localDx / (halfW * 2));
+              }
+              if (halfH > 0) {
+                state.lassoScaleY = Math.max(0.01, corner.signY * localDy / (halfH * 2));
+              }
             }
+
+            // Reposition the center so the diagonally opposite corner remains
+            // exactly fixed while the dragged corner changes the scale.
+            const oppositeX = -corner.signX * halfW * state.lassoScaleX;
+            const oppositeY = -corner.signY * halfH * state.lassoScaleY;
+            const newCenterX = pivot.x - (oppositeX * cosR - oppositeY * sinR);
+            const newCenterY = pivot.y - (oppositeX * sinR + oppositeY * cosR);
+            state.lassoCurrentOffset = {
+              x: newCenterX - (state.lassoBoundingBox.x + halfW),
+              y: newCenterY - (state.lassoBoundingBox.y + halfH)
+            };
           } else {
-            const rot = -(state.lassoRotation || 0);
-            const localDx = dx * Math.cos(rot) - dy * Math.sin(rot);
-            const localDy = dx * Math.sin(rot) + dy * Math.cos(rot);
-            
-            if (state.lassoStartDistX > 0) {
-              state.lassoScaleX = state.lassoBaseScaleX * (Math.abs(localDx) / state.lassoStartDistX);
-            }
-            if (state.lassoStartDistY > 0) {
-              state.lassoScaleY = state.lassoBaseScaleY * (Math.abs(localDy) / state.lassoStartDistY);
+            const center = state.lassoBaseCenter;
+            const dx = x - center.x;
+            const dy = y - center.y;
+            state.lassoCurrentOffset = { ...state.lassoStartOffset };
+
+            if (e.shiftKey) {
+              const distance = Math.hypot(dx, dy);
+              if (state.lassoStartDist > 0) {
+                const uniformScale = Math.max(0.01,
+                  state.lassoBaseScale * (distance / state.lassoStartDist));
+                state.lassoScaleX = uniformScale;
+                state.lassoScaleY = uniformScale;
+              }
+            } else {
+              const localDx = dx * cosR + dy * sinR;
+              const localDy = -dx * sinR + dy * cosR;
+              if (state.lassoStartDistX > 0) {
+                state.lassoScaleX = Math.max(0.01,
+                  state.lassoBaseScaleX * (Math.abs(localDx) / state.lassoStartDistX));
+              }
+              if (state.lassoStartDistY > 0) {
+                state.lassoScaleY = Math.max(0.01,
+                  state.lassoBaseScaleY * (Math.abs(localDy) / state.lassoStartDistY));
+              }
             }
           }
         }
@@ -3671,8 +3936,8 @@ container.addEventListener('pointermove', e => {
         const dx = x - state.lassoDragStart.x;
         const dy = y - state.lassoDragStart.y;
         state.lassoCurrentOffset = {
-          x: state.lassoStartOffset.x + dx,
-          y: state.lassoStartOffset.y + dy,
+          x: Math.round(state.lassoStartOffset.x + dx),
+          y: Math.round(state.lassoStartOffset.y + dy),
         };
       }
       compositeAll();
@@ -3780,6 +4045,7 @@ container.addEventListener('pointerup', e => {
     state.strokeLctx = null;
   }
   state.strokeSourceCanvas = null; // Free snapshot canvas
+  clearEraserStroke();
 
   // ── Lasso and Magic Wand pointerup ───────────────────────────────
   if (state.tool === 'lasso' || state.tool === 'magicwand') {
@@ -3787,6 +4053,8 @@ container.addEventListener('pointerup', e => {
       // Finish drag — commit new offset
       state.lassoDragged = false;
       state.lassoPrevOffset = { ...state.lassoCurrentOffset };
+      state.selectionMask = getExistingSelectionMask();
+      saveHistory();
     } else if (state.tool === 'lasso') {
       // Finish drawing lasso path
       if (state.lassoPath.length > 2) {
@@ -3799,11 +4067,13 @@ container.addEventListener('pointerup', e => {
           state.lassoActive = true;
           extractLassoSelection();
           drawLassoSelectionOutline();
+          saveHistory();
         }
       } else {
         // Path too short — only discard if not in modifier mode
         if (!state.lassoShiftKey && !state.lassoAltKey) {
           discardLassoSelection(); // bakes floating pixels if any, then clears
+          saveHistory();
         }
       }
       state.lassoShiftKey = false;
@@ -3844,6 +4114,7 @@ container.addEventListener('pointerleave', e => {
       state.strokeLctx.restore();
       state.strokeLctx = null;
     }
+    clearEraserStroke();
 
     // Lasso: if path has enough points, close and extract selection on canvas exit
     if (state.tool === 'lasso') {
@@ -3853,11 +4124,14 @@ container.addEventListener('pointerleave', e => {
         state.lassoActive = true;
         extractLassoSelection();
         drawLassoSelectionOutline();
+        saveHistory();
       } else if (!state.lassoDragged) {
         state.lassoDragged = false;
         state.lassoPath = [];
         state.lassoPaths = [];
         pctx.clearRect(0, 0, canvasW, canvasH);
+        selectionOverlay.replaceChildren();
+        saveHistory();
       }
       return;
     }
@@ -3904,7 +4178,7 @@ function selectAllSelection() {
   }
   if (state.lassoActive) {
     if (state.tool === 'lasso' || state.tool === 'magicwand') {
-      bakeLassoSelection();
+      bakeLassoSelection(false);
     } else {
       bakeFloatingSelectionOnly();
       state.lassoActive = false;
@@ -3922,6 +4196,7 @@ function selectAllSelection() {
   state.lassoActive = true;
   extractLassoSelection();
   drawLassoSelectionOutline();
+  saveHistory();
 }
 
 // ─── Keyboard Shortcuts ──────────────────────────────────────────
@@ -3930,7 +4205,7 @@ let _toolBeforeCtrl = null; // stores the tool active before Ctrl held
 document.addEventListener('keydown', e => {
   // Block single-key shortcuts when typing in an input,
   // but ALWAYS allow Ctrl/Meta combos (undo, redo, new canvas, etc.)
-  if (e.target.tagName === 'INPUT' && !e.ctrlKey && !e.metaKey) return;
+  if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) && !e.ctrlKey && !e.metaKey) return;
 
   // Alt+A — Auto Adjust Canvas size to active floating selection
   if (e.altKey && e.code === 'KeyA') {
@@ -3943,6 +4218,7 @@ document.addEventListener('keydown', e => {
     if (state.tool === 'brush') {
       e.preventDefault();
       state.isAltDrawing = true;
+      updateBlurOptionVisibility();
       ensureCursor();
       if (cursorEl) {
         cursorEl.style.border = '1.5px dashed #3498db';
@@ -4192,6 +4468,7 @@ document.addEventListener('keyup', e => {
     if (state.tool === 'brush') {
       e.preventDefault();
       state.isAltDrawing = false;
+      updateBlurOptionVisibility();
       ensureCursor();
       if (cursorEl) {
         cursorEl.style.border = '1.5px solid rgba(255,255,255,0.8)';
@@ -4212,6 +4489,12 @@ document.addEventListener('keyup', e => {
     }
     _toolBeforeCtrl = null;
   }
+});
+
+window.addEventListener('blur', () => {
+  if (!state.isAltDrawing) return;
+  state.isAltDrawing = false;
+  updateBlurOptionVisibility();
 });
 
 // Clear internal clipboard if user leaves the tab (so external copy takes precedence on Ctrl+V)
@@ -4527,14 +4810,22 @@ function setTool(tool) {
   } else if (['pencil', 'brush', 'eraser', 'line', 'rect', 'circle', 'curve'].includes(tool)) {
     if (sizeOpts) sizeOpts.style.display = 'flex';
     if (opacityOpts) opacityOpts.style.display = 'flex';
-    if (tool === 'brush') {
+    if (tool === 'brush' || tool === 'eraser') {
       if (hardnessOpts) hardnessOpts.style.display = 'flex';
       if (spacingOpts) spacingOpts.style.display = 'flex';
-      if (blurRadiusOpts) blurRadiusOpts.style.display = 'flex';
-      if (blurStrengthOpts) blurStrengthOpts.style.display = 'flex';
-      updateBrushTip();
     }
+    if (tool === 'brush' || tool === 'eraser') updateBrushTip();
   }
+  updateBlurOptionVisibility();
+}
+
+function updateBlurOptionVisibility() {
+  const blurRadiusOpts = document.getElementById('blur-radius-option-container');
+  const blurStrengthOpts = document.getElementById('blur-strength-option-container');
+  const showingBlur = state.tool === 'brush' && state.isAltDrawing;
+
+  if (blurRadiusOpts) blurRadiusOpts.style.display = showingBlur ? 'flex' : 'none';
+  if (blurStrengthOpts) blurStrengthOpts.style.display = showingBlur ? 'flex' : 'none';
 }
 
 document.querySelectorAll('.tool-btn').forEach(btn => {
@@ -4799,12 +5090,15 @@ document.getElementById('modal-overlay').addEventListener('click', e => {
 // Arquivo dropdown
 const btnNew = document.getElementById('btn-new');
 const menuArquivo = document.getElementById('menu-arquivo-dropdown');
+const btnView = document.getElementById('btn-view');
+const menuView = document.getElementById('menu-view-dropdown');
 
 btnNew.addEventListener('click', (e) => {
   e.stopPropagation();
   menuArquivo.classList.toggle('show');
   menuEditar.classList.remove('show');
   menuSelect.classList.remove('show');
+  menuView.classList.remove('show');
 });
 
 document.getElementById('menu-new-canvas').addEventListener('click', () => {
@@ -4825,6 +5119,7 @@ btnEdit.addEventListener('click', (e) => {
   menuEditar.classList.toggle('show');
   menuArquivo.classList.remove('show');
   menuSelect.classList.remove('show');
+  menuView.classList.remove('show');
 });
 
 // ─── Background mode handlers ─────────────────────────────────────
@@ -4868,6 +5163,7 @@ btnSelect.addEventListener('click', (e) => {
   menuSelect.classList.toggle('show');
   menuArquivo.classList.remove('show');
   menuEditar.classList.remove('show');
+  menuView.classList.remove('show');
   
   // Update enabled/disabled status of Select More & Select Less
   const selectMoreBtn = document.getElementById('menu-select-more');
@@ -4884,6 +5180,30 @@ btnSelect.addEventListener('click', (e) => {
     selectLessBtn.style.pointerEvents = 'none';
   }
 });
+
+// View dropdown — these controls affect presentation only, never artwork data.
+btnView.addEventListener('click', (e) => {
+  e.stopPropagation();
+  menuView.classList.toggle('show');
+  menuArquivo.classList.remove('show');
+  menuEditar.classList.remove('show');
+  menuSelect.classList.remove('show');
+});
+
+function setViewToggle(buttonId, stateKey) {
+  const button = document.getElementById(buttonId);
+  button.addEventListener('click', () => {
+    state[stateKey] = !state[stateKey];
+    button.classList.toggle('active', state[stateKey]);
+    button.setAttribute('aria-pressed', String(state[stateKey]));
+    if (stateKey === 'viewTile') updateTileCanvas();
+    applyTransform();
+  });
+}
+
+setViewToggle('menu-view-tile', 'viewTile');
+setViewToggle('menu-view-flip-x', 'viewFlipX');
+setViewToggle('menu-view-flip-y', 'viewFlipY');
 
 document.getElementById('menu-select-more').addEventListener('click', () => {
   menuSelect.classList.remove('show');
@@ -4946,11 +5266,12 @@ document.addEventListener('click', () => {
   menuArquivo.classList.remove('show');
   menuEditar.classList.remove('show');
   menuSelect.classList.remove('show');
+  menuView.classList.remove('show');
 });
 
 function modifySelection(amount, expand) {
   const lctx = getLCtx();
-  if (!lctx || !state.lassoActive || !state.lassoSelectionCanvas || !state.lassoBoundingBox) return;
+  if (!lctx || !state.lassoActive || !state.lassoBoundingBox) return;
 
   const ox = state.lassoCurrentOffset.x;
   const oy = state.lassoCurrentOffset.y;
@@ -4962,33 +5283,25 @@ function modifySelection(amount, expand) {
   const cx = bx + bw / 2;
   const cy = by + bh / 2;
 
-  // Restore the original pixels back onto the layer temporarily
-  lctx.save();
-  lctx.globalCompositeOperation = 'source-over';
-  lctx.imageSmoothingEnabled = isAntiAliasingEnabled();
-  lctx.translate(cx, cy);
-  lctx.rotate(state.lassoRotation || 0);
-  lctx.scale(state.lassoScaleX || 1, state.lassoScaleY || 1);
-  lctx.translate(-cx, -cy);
-  lctx.drawImage(state.lassoSelectionCanvas, bx, by);
-  lctx.restore();
+  const wasFloating = !!state.lassoSelectionCanvas;
+  const src = getExistingSelectionMask();
 
-  const src = new Uint8Array(canvasW * canvasH);
-  if (state.selectionMask) {
-    const rx = Math.round(ox);
-    const ry = Math.round(oy);
-    for (let y = 0; y < canvasH; y++) {
-      const ny = y + ry;
-      if (ny < 0 || ny >= canvasH) continue;
-      for (let x = 0; x < canvasW; x++) {
-        const nx = x + rx;
-        if (nx < 0 || nx >= canvasW) continue;
-        if (state.selectionMask[x + y * canvasW] === 1) {
-          src[nx + ny * canvasW] = 1;
-        }
-      }
-    }
-  } else {
+  // Floating selections temporarily own their pixels. Restore those pixels
+  // before rebuilding the modified floating selection. Stencil selections
+  // never touch layer pixels here.
+  if (wasFloating) {
+    lctx.save();
+    lctx.globalCompositeOperation = 'source-over';
+    lctx.imageSmoothingEnabled = selectionNeedsResampling() && isAntiAliasingEnabled();
+    lctx.translate(cx, cy);
+    lctx.rotate(state.lassoRotation || 0);
+    lctx.scale(state.lassoScaleX || 1, state.lassoScaleY || 1);
+    lctx.translate(-cx, -cy);
+    lctx.drawImage(state.lassoSelectionCanvas, bx, by);
+    lctx.restore();
+  }
+
+  if (!src.some(value => value === 1)) {
     // Fallback to paths if selectionMask is not available
     const tempCanvas = document.createElement('canvas');
     tempCanvas.width = canvasW;
@@ -5080,7 +5393,7 @@ function modifySelection(amount, expand) {
     state.lassoPaths = newPaths;
     state.lassoPath = newPaths[0]; // fallback
     state.lassoActive = true;
-    extractLassoSelection(dest);
+    extractLassoSelection(dest, false, wasFloating);
     drawLassoSelectionOutline();
   } else {
     state.lassoActive = false;
@@ -5089,7 +5402,9 @@ function modifySelection(amount, expand) {
     state.lassoSelectionCanvas = null;
     state.lassoMaskCanvas = null;
     state.lassoBoundingBox = null;
+    state.selectionMask = null;
     pctx.clearRect(0, 0, canvasW, canvasH);
+    selectionOverlay.replaceChildren();
     compositeAll();
   }
   saveHistory();
@@ -5157,6 +5472,9 @@ function resizeCanvas(newW, newH, offsetX = 0, offsetY = 0, isAutoAdjust = false
   mainCanvas.height = newH;
   previewCanvas.width = newW;
   previewCanvas.height = newH;
+  selectionOverlay.setAttribute('viewBox', `0 0 ${newW} ${newH}`);
+  selectionOverlay.style.width = `${newW}px`;
+  selectionOverlay.style.height = `${newH}px`;
 
   // Resize all frames in drawing layers only (video layers have no frame canvases)
   layers.forEach(l => {
@@ -6129,11 +6447,15 @@ if (btnLassoTransform) {
     if ((state.tool === 'lasso' || state.tool === 'magicwand') && state.lassoActive) {
       state.lassoTransformMode = !state.lassoTransformMode;
       if (state.lassoTransformMode) {
+        if (!state.lassoSelectionCanvas) {
+          extractLassoSelection(state.selectionMask, true, true);
+        }
         btnLassoTransform.classList.add('active');
       } else {
         btnLassoTransform.classList.remove('active');
       }
       drawLassoSelectionOutline();
+      saveHistory();
     }
   });
 }

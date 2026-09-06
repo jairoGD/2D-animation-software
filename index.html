@@ -188,7 +188,15 @@
               <button class="dropdown-item" id="menu-flip-vertical">Flip Vertical</button>
             </div>
           </div>
-          <button class="menu-btn" id="btn-view">View</button>
+          <div class="menu-item-wrapper">
+            <button class="menu-btn" id="btn-view">View</button>
+            <div class="dropdown-menu" id="menu-view-dropdown">
+              <button class="dropdown-item view-menu-toggle" id="menu-view-tile" aria-pressed="false"><span class="menu-check">✓</span>Tile</button>
+              <div class="dropdown-separator"></div>
+              <button class="dropdown-item view-menu-toggle" id="menu-view-flip-x" aria-pressed="false"><span class="menu-check">✓</span>Flip Canvas X</button>
+              <button class="dropdown-item view-menu-toggle" id="menu-view-flip-y" aria-pressed="false"><span class="menu-check">✓</span>Flip Canvas Y</button>
+            </div>
+          </div>
         </nav>
         <input type="file" id="image-input" accept="image/*" multiple style="display: none;" />
         <input type="file" id="video-input" accept="video/*" style="display: none;" />
@@ -389,8 +397,10 @@
       <!-- Canvas Area -->
       <main id="canvas-area">
         <div id="canvas-container">
+          <canvas id="tile-canvas"></canvas>
           <canvas id="main-canvas"></canvas>
           <canvas id="preview-canvas"></canvas>
+          <svg id="selection-overlay" aria-hidden="true"></svg>
         </div>
         <!-- Status Bar -->
         <div id="status-bar">
