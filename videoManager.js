@@ -43,12 +43,12 @@
     // Get list of videos that should exist
     const activeVideos = layers.filter(l => l.isVideo && l.video).map(l => l.video);
 
-    // Remove any video that is not in the active layers
+    // Videos from inactive document tabs must only be detached. Clearing src
+    // here destroys the media owned by the other document and also fires its
+    // error handler, making a valid imported video appear unsupported.
     domVideos.forEach(v => {
       if (!activeVideos.includes(v)) {
         v.pause();
-        v.src = "";
-        v.load();
         v.remove();
       }
     });
@@ -80,6 +80,15 @@
         l.video.style.mixBlendMode = cssBlend;
       }
     }
+  }
+
+  function disposeVideoElement(video) {
+    if (!video) return;
+    video.pause();
+    video.remove();
+    const source = video.currentSrc || video.src || '';
+    video.removeAttribute('src');
+    if (source.startsWith('blob:')) URL.revokeObjectURL(source);
   }
 
   function reconnectVideoLayer(layer) {
@@ -222,6 +231,7 @@
 
   // Expose functions to global scope
   window.syncDOMVideos = syncDOMVideos;
+  window.disposeVideoElement = disposeVideoElement;
   window.reconnectVideoLayer = reconnectVideoLayer;
   window.importVideoFile = importVideoFile;
 })();

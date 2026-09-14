@@ -19,8 +19,11 @@ const state = {
   brushSpacing: 0.15,
   brushBlurRadius: 5,
   brushBlurStrength: 0.25,
+  blurScratchPixels: null,
+  blurOriginalPixels: null,
   brushTipCanvas: null,
   brushTipImageData: null,
+  brushTipDirty: true,
   eraserOriginalPixels: null,
   eraserCoverage: null,
   eraserCoverageWidth: 0,
@@ -112,6 +115,14 @@ let canvasH = 512;
 let layers        = [];   // array of { id, name, visible, opacity, frames: [{ canvas, ctx, isKeyframe }] }
 let layerIdCount  = 1;
 let activeLayerIdx = 0;
+
+// Each open document keeps its own references to layers, history, selection,
+// timeline and viewport state. The visible canvases are reused when switching
+// tabs, then repainted from the selected document.
+const openDocuments = [];
+let activeDocumentId = null;
+let documentIdCounter = 1;
+let untitledDocumentCounter = 1;
 
 function getLCtx() {
   const f = layers[activeLayerIdx]?.frames[state.currentFrame];
@@ -592,6 +603,18 @@ function updateTileCanvas() {
 
 // ─── Layers ──────────────────────────────────────────────────────
 function addLayer(name) {
+  // A floating selection temporarily owns pixels removed from the active
+  // layer. Commit them before inserting a layer at the active index, otherwise
+  // the same index starts pointing at the new layer and the source keeps a
+  // permanent transparent hole.
+  if (state.lassoActive) {
+    if (state.lassoSelectionCanvas) {
+      bakeLassoSelection(false);
+    } else {
+      _clearLassoStateOnly();
+    }
+  }
+
   const l = createLayerData(name);
   layers.splice(activeLayerIdx, 0, l);
   renderLayerPanel();
@@ -680,7 +703,10 @@ function mergeActiveLayerDown() {
 
 function deleteActiveLayer() {
   if (layers.length <= 1) return;
-  layers.splice(activeLayerIdx, 1);
+  const [removedLayer] = layers.splice(activeLayerIdx, 1);
+  if (removedLayer?.isVideo && typeof window.disposeVideoElement === 'function') {
+    window.disposeVideoElement(removedLayer.video);
+  }
   activeLayerIdx = Math.max(0, activeLayerIdx - 1);
   renderLayerPanel();
   renderTimeline();
@@ -1443,6 +1469,370 @@ function initCanvas(w, h, bgColor = '#ffffff') {
   document.getElementById('canvas-size-display').textContent = `${w} × ${h} px`;
 }
 
+// ─── Multi-document Tabs ────────────────────────────────────────
+const DOCUMENT_STATE_KEYS = [
+  'tool', 'fgColor', 'bgColor', 'bgMode', 'brushSize', 'brushHardness',
+  'brushSpacing', 'brushBlurRadius', 'brushBlurStrength', 'toolSizes',
+  'opacity', 'bucketThreshold', 'zoom', 'panX', 'panY', 'currentFrame',
+  'totalFrames', 'fps', 'loop', 'onionSkin', 'history', 'redoStack',
+  'lassoType', 'lassoPath', 'lassoPaths', 'lassoActive', 'lassoAnimState',
+  'lassoSelectionCanvas', 'lassoMaskCanvas', 'lassoBoundingBox',
+  'lassoCurrentOffset', 'lassoPrevOffset', 'lassoStartOffset',
+  'lassoDragged', 'lassoTransformMode', 'lassoScaleX', 'lassoScaleY',
+  'lassoRotation', 'lassoScaleCorner', 'lassoScalePivot', 'lassoDragStart',
+  'lassoBaseScale', 'lassoBaseScaleX', 'lassoBaseScaleY',
+  'lassoBaseRotation', 'selectionMask', 'lassoCutPending', 'allLayersActive',
+  'viewTile', 'viewFlipX', 'viewFlipY', 'shiftAnchor', 'curveStep',
+  'curvePoints'
+];
+
+function getActiveDocument() {
+  return openDocuments.find(doc => doc.id === activeDocumentId) || null;
+}
+
+function captureActiveDocument() {
+  const doc = getActiveDocument();
+  if (!doc) return;
+
+  doc.canvasW = canvasW;
+  doc.canvasH = canvasH;
+  doc.layers = layers;
+  doc.layerIdCount = layerIdCount;
+  doc.activeLayerIdx = activeLayerIdx;
+  doc.projectHandle = window.currentProjectHandle || null;
+  doc.projectName = window.currentProjectName || null;
+  doc.runtime = {};
+  DOCUMENT_STATE_KEYS.forEach(key => {
+    doc.runtime[key] = state[key];
+  });
+}
+
+function resetDocumentRuntime() {
+  state.history = [];
+  state.redoStack = [];
+  state.currentFrame = 0;
+  state.totalFrames = 24;
+  state.fps = 12;
+  state.loop = true;
+  state.onionSkin = false;
+  state.zoom = 1;
+  state.panX = 0;
+  state.panY = 0;
+  state.viewTile = false;
+  state.viewFlipX = false;
+  state.viewFlipY = false;
+  state.shiftAnchor = null;
+  state.curveStep = 0;
+  state.curvePoints = [];
+  state.isPlaying = false;
+  state.isDrawing = false;
+  state.isPanning = false;
+  state.isMovingAllBitmaps = false;
+  state.colorAdjustPreview = null;
+  state.colorRampPreview = null;
+  state.lassoActive = false;
+  state.lassoPath = [];
+  state.lassoPaths = [];
+  state.lassoSelectionCanvas = null;
+  state.lassoMaskCanvas = null;
+  state.lassoBoundingBox = null;
+  state.lassoCurrentOffset = { x: 0, y: 0 };
+  state.lassoPrevOffset = { x: 0, y: 0 };
+  state.lassoStartOffset = { x: 0, y: 0 };
+  state.lassoDragged = false;
+  state.lassoTransformMode = false;
+  state.lassoScaleX = 1;
+  state.lassoScaleY = 1;
+  state.lassoRotation = 0;
+  state.selectionMask = null;
+  state.toolSizes = { ...state.toolSizes };
+  layers = [];
+  layerIdCount = 1;
+  activeLayerIdx = 0;
+  pctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+  selectionOverlay.replaceChildren();
+}
+
+function beginDocumentSession(label, projectHandle = null, projectName = null, kind = 'project') {
+  if (state.isPlaying && typeof pause === 'function') pause();
+  captureActiveDocument();
+  resetDocumentRuntime();
+
+  const doc = {
+    id: documentIdCounter++,
+    name: label || `Untitled ${untitledDocumentCounter++}`,
+    kind,
+    projectHandle,
+    projectName,
+    imageHandle: null,
+    imageName: null,
+    imageType: null,
+    runtime: null,
+    layers: []
+  };
+  openDocuments.push(doc);
+  activeDocumentId = doc.id;
+  window.currentProjectHandle = projectHandle;
+  window.currentProjectName = projectName;
+  renderDocumentTabs();
+  return doc;
+}
+
+function finishCurrentDocument(label = null, projectHandle = window.currentProjectHandle,
+  projectName = window.currentProjectName) {
+  const doc = getActiveDocument();
+  if (!doc) return;
+  if (label) doc.name = label;
+  doc.projectHandle = projectHandle || null;
+  doc.projectName = projectName || null;
+  window.currentProjectHandle = doc.projectHandle;
+  window.currentProjectName = doc.projectName;
+  captureActiveDocument();
+  document.title = `Illustra (${doc.name})`;
+  renderDocumentTabs();
+}
+
+function syncDocumentUi() {
+  mainCanvas.width = canvasW;
+  mainCanvas.height = canvasH;
+  previewCanvas.width = canvasW;
+  previewCanvas.height = canvasH;
+  selectionOverlay.setAttribute('viewBox', `0 0 ${canvasW} ${canvasH}`);
+  selectionOverlay.style.width = `${canvasW}px`;
+  selectionOverlay.style.height = `${canvasH}px`;
+  document.getElementById('canvas-size-display').textContent = `${canvasW} × ${canvasH} px`;
+
+  const fpsInput = document.getElementById('timeline-fps');
+  const framesInput = document.getElementById('timeline-total-frames');
+  const loopInput = document.getElementById('timeline-loop');
+  const onionButton = document.getElementById('btn-onion');
+  if (fpsInput) fpsInput.value = state.fps;
+  if (framesInput) framesInput.value = state.totalFrames;
+  if (loopInput) loopInput.checked = state.loop;
+  if (onionButton) onionButton.classList.toggle('active', state.onionSkin);
+
+  document.querySelectorAll('input[name="bgMode"]').forEach(radio => {
+    radio.checked = radio.value === state.bgMode;
+  });
+  const allLayersCheckbox = document.getElementById('all-layers-toggle');
+  if (allLayersCheckbox) allLayersCheckbox.checked = state.allLayersActive;
+  ['viewTile', 'viewFlipX', 'viewFlipY'].forEach((key, index) => {
+    const ids = ['menu-view-tile', 'menu-view-flip-x', 'menu-view-flip-y'];
+    const button = document.getElementById(ids[index]);
+    if (!button) return;
+    button.classList.toggle('active', !!state[key]);
+    button.setAttribute('aria-pressed', String(!!state[key]));
+  });
+
+  setFgColor(state.fgColor);
+  setBgColor(state.bgColor);
+  setTool(state.tool);
+  setBrushSize(state.brushSize);
+
+  const transformButton = document.getElementById('btn-lasso-transform');
+  if (transformButton) {
+    transformButton.classList.toggle('hidden', !state.lassoActive ||
+      (state.tool !== 'lasso' && state.tool !== 'magicwand'));
+    transformButton.classList.toggle('active', !!state.lassoTransformMode);
+  }
+
+  if (typeof syncDOMVideos === 'function') syncDOMVideos();
+  renderLayerPanel();
+  renderTimeline();
+  compositeAll();
+  applyTransform();
+  if (state.lassoActive) drawLassoSelectionOutline();
+}
+
+function restoreDocument(doc) {
+  if (!doc || !doc.runtime) return;
+  canvasW = doc.canvasW;
+  canvasH = doc.canvasH;
+  layers = doc.layers;
+  layerIdCount = doc.layerIdCount;
+  activeLayerIdx = doc.activeLayerIdx;
+  DOCUMENT_STATE_KEYS.forEach(key => {
+    state[key] = doc.runtime[key];
+  });
+  state.isPlaying = false;
+  state.isDrawing = false;
+  state.isPanning = false;
+  state.isMovingAllBitmaps = false;
+  window.currentProjectHandle = doc.projectHandle || null;
+  window.currentProjectName = doc.projectName || null;
+  document.title = `Illustra (${doc.name})`;
+  syncDocumentUi();
+}
+
+function switchDocument(documentId) {
+  if (documentId === activeDocumentId) return;
+  const target = openDocuments.find(doc => doc.id === documentId);
+  if (!target) return;
+  if (state.isPlaying && typeof pause === 'function') pause();
+  captureActiveDocument();
+  activeDocumentId = documentId;
+  restoreDocument(target);
+  renderDocumentTabs();
+}
+
+function closeDocument(documentId) {
+  const index = openDocuments.findIndex(doc => doc.id === documentId);
+  if (index < 0) return;
+  if (openDocuments.length === 1) {
+    showToast('⚠️ At least one document must remain open');
+    return;
+  }
+  const doc = openDocuments[index];
+  if (!window.confirm(`Close "${doc.name}"? Unsaved changes will be discarded.`)) return;
+
+  const wasActive = documentId === activeDocumentId;
+  if (typeof window.disposeVideoElement === 'function') {
+    doc.layers.filter(layer => layer.isVideo).forEach(layer => {
+      window.disposeVideoElement(layer.video);
+    });
+  }
+  openDocuments.splice(index, 1);
+  if (wasActive) {
+    const next = openDocuments[Math.min(index, openDocuments.length - 1)];
+    activeDocumentId = next.id;
+    restoreDocument(next);
+  }
+  renderDocumentTabs();
+}
+
+function renderDocumentTabs() {
+  const tabs = document.getElementById('document-tabs');
+  if (!tabs) return;
+  tabs.replaceChildren();
+
+  openDocuments.forEach(doc => {
+    const tab = document.createElement('div');
+    tab.className = 'document-tab' + (doc.id === activeDocumentId ? ' active' : '');
+    tab.dataset.documentId = String(doc.id);
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-selected', String(doc.id === activeDocumentId));
+    tab.tabIndex = doc.id === activeDocumentId ? 0 : -1;
+    tab.title = doc.name;
+
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    icon.setAttribute('viewBox', '0 0 24 24');
+    icon.setAttribute('fill', 'none');
+    icon.setAttribute('stroke', 'currentColor');
+    icon.setAttribute('stroke-width', '2');
+    icon.classList.add('document-tab-icon');
+    icon.innerHTML = '<rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M3 16l5-5 4 4 3-3 6 6"></path>';
+
+    const name = document.createElement('span');
+    name.className = 'document-tab-name';
+    name.textContent = doc.name;
+
+    const close = document.createElement('button');
+    close.className = 'document-tab-close';
+    close.type = 'button';
+    close.title = `Close ${doc.name}`;
+    close.setAttribute('aria-label', `Close ${doc.name}`);
+    close.textContent = '×';
+    close.addEventListener('click', event => {
+      event.stopPropagation();
+      closeDocument(doc.id);
+    });
+
+    tab.append(icon, name, close);
+    tab.addEventListener('click', () => switchDocument(doc.id));
+    tab.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        switchDocument(doc.id);
+      }
+    });
+    tabs.appendChild(tab);
+  });
+
+  const activeTab = tabs.querySelector('.document-tab.active');
+  if (activeTab) activeTab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+function registerInitialDocument() {
+  if (openDocuments.length > 0) return;
+  const name = `Untitled ${untitledDocumentCounter++}`;
+  const doc = {
+    id: documentIdCounter++, name, kind: 'project', projectHandle: null,
+    projectName: null, imageHandle: null, imageName: null, imageType: null,
+    runtime: null, layers: []
+  };
+  openDocuments.push(doc);
+  activeDocumentId = doc.id;
+  window.currentProjectHandle = null;
+  window.currentProjectName = null;
+  captureActiveDocument();
+  document.title = `Illustra (${name})`;
+  renderDocumentTabs();
+}
+
+function createBlankDocument(w, h, bgColor) {
+  const name = `Untitled ${untitledDocumentCounter++}`;
+  beginDocumentSession(name, null, null, 'project');
+  state.bgMode = 'white';
+  initCanvas(w, h, bgColor);
+  setBgColor(bgColor);
+  finishCurrentDocument(name, null, null);
+}
+
+function openImageAsDocument(file, imageHandle = null) {
+  if (!isImageFile(file)) return Promise.resolve(false);
+  return new Promise(resolve => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const width = img.naturalWidth || img.width;
+      const height = img.naturalHeight || img.height;
+      const baseName = file.name.replace(/\.[^.]+$/, '') || 'Image';
+      const doc = beginDocumentSession(file.name, null, baseName, 'image');
+      doc.imageHandle = imageHandle;
+      doc.imageName = file.name;
+      doc.imageType = file.type || null;
+      state.bgMode = 'trans-bright';
+      initCanvas(width, height, '#ffffff');
+      state.bgMode = 'trans-bright';
+
+      const layer = layers[0];
+      layer.name = baseName.substring(0, 40);
+      const frame = layer.frames[0];
+      frame.canvas = document.createElement('canvas');
+      frame.canvas.width = width;
+      frame.canvas.height = height;
+      frame.ctx = frame.canvas.getContext('2d');
+      frame.ctx.drawImage(img, 0, 0);
+      frame.isKeyframe = true;
+      syncBackingCanvas(frame);
+
+      state.history = [];
+      state.redoStack = [];
+      saveHistory();
+      centerCanvas();
+      finishCurrentDocument(file.name, null, baseName);
+      syncDocumentUi();
+      URL.revokeObjectURL(objectUrl);
+      showToast(`🖼️ ${file.name} opened in a new tab`);
+      resolve(true);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      showToast(`⚠️ Could not open ${file.name}`);
+      resolve(false);
+    };
+    img.src = objectUrl;
+  });
+}
+
+window.beginDocumentLoad = (name, handle = null) =>
+  beginDocumentSession(name || 'Project', handle, name || null, 'project');
+window.finishDocumentLoad = (name, handle = window.currentProjectHandle) =>
+  finishCurrentDocument(name || 'Project', handle, name || null);
+window.updateCurrentDocumentTab = (name, handle = window.currentProjectHandle) =>
+  finishCurrentDocument(name || getActiveDocument()?.name, handle, name || null);
+window.openImageAsDocument = openImageAsDocument;
+
 function centerCanvas() {
   const area = container.getBoundingClientRect();
   const fitScale = Math.min(
@@ -1498,6 +1888,68 @@ function clientToCanvas(clientX, clientY) {
   }
   
   return { x, y };
+}
+
+// Selection geometry always lives on the canvas pixel grid, independently of
+// the brush anti-aliasing setting. Integer coordinates represent pixel edges;
+// a rectangle from (10, 10) to (11, 11), for example, selects exactly one
+// pixel. This keeps the visible marquee and the extracted pixel mask aligned.
+function snapSelectionPoint(x, y) {
+  return {
+    x: Math.round(x),
+    y: Math.round(y)
+  };
+}
+
+// Rasterize one or more closed paths into a truly binary, pixel-addressed
+// mask. Testing scanlines through pixel centers avoids the ambiguous
+// anti-aliased edge coverage produced by CanvasRenderingContext2D.fill().
+// Combining all intersections on a row also preserves the even-odd rule used
+// by selections with holes.
+function rasterizeSelectionPaths(paths) {
+  const mask = new Uint8Array(canvasW * canvasH);
+  const edgesByRow = Array.from({ length: canvasH }, () => []);
+
+  (paths || []).forEach(path => {
+    if (!path || path.length < 3) return;
+
+    const edgeCount = path.length;
+    for (let i = 0; i < edgeCount; i++) {
+      const a = path[i];
+      const b = path[(i + 1) % edgeCount];
+      if (!a || !b || a.y === b.y) continue;
+
+      const top = a.y < b.y ? a : b;
+      const bottom = a.y < b.y ? b : a;
+      const firstRow = Math.max(0, Math.ceil(top.y - 0.5));
+      const lastRowExclusive = Math.min(canvasH, Math.ceil(bottom.y - 0.5));
+
+      for (let y = firstRow; y < lastRowExclusive; y++) {
+        const scanY = y + 0.5;
+        const t = (scanY - top.y) / (bottom.y - top.y);
+        edgesByRow[y].push(top.x + (bottom.x - top.x) * t);
+      }
+    }
+  });
+
+  for (let y = 0; y < canvasH; y++) {
+    const intersections = edgesByRow[y];
+    if (intersections.length < 2) continue;
+    intersections.sort((a, b) => a - b);
+
+    for (let i = 0; i + 1 < intersections.length; i += 2) {
+      const left = intersections[i];
+      const right = intersections[i + 1];
+      const firstX = Math.max(0, Math.ceil(left - 0.5));
+      const lastXExclusive = Math.min(canvasW, Math.ceil(right - 0.5));
+      const rowOffset = y * canvasW;
+      for (let x = firstX; x < lastXExclusive; x++) {
+        mask[rowOffset + x] = 1;
+      }
+    }
+  }
+
+  return mask;
 }
 
 // ─── History (Undo/Redo) ─────────────────────────────────────────
@@ -1929,48 +2381,50 @@ function bakeFloatingSelectionOnly() {
       });
     });
     
-    // Recalculate bounding box
+    // Rebuild the stencil from the transformed paths using the same binary
+    // pixel-center rule as a newly drawn selection.
+    const transformedMask = rasterizeSelectionPaths(state.lassoPaths);
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    state.lassoPaths.forEach(path => {
-      path.forEach(p => {
-        if (p.x < minX) minX = p.x;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.y > maxY) maxY = p.y;
-      });
-    });
-    minX = Math.floor(Math.max(0, minX));
-    maxX = Math.ceil(Math.min(canvasW, maxX));
-    minY = Math.floor(Math.max(0, minY));
-    maxY = Math.ceil(Math.min(canvasH, maxY));
-    state.lassoBoundingBox = { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
-    
-    // Regenerate lassoMaskCanvas
-    const w = state.lassoBoundingBox.w;
-    const h = state.lassoBoundingBox.h;
-    const maskCanvas = document.createElement('canvas');
-    maskCanvas.width = w || 1; maskCanvas.height = h || 1;
-    const maskCtx = maskCanvas.getContext('2d');
-    maskCtx.fillStyle = 'white';
-    maskCtx.beginPath();
-    state.lassoPaths.forEach(path => {
-      if (!path || path.length < 2) return;
-      maskCtx.moveTo(path[0].x - state.lassoBoundingBox.x, path[0].y - state.lassoBoundingBox.y);
-      for (let i = 1; i < path.length; i++) {
-        maskCtx.lineTo(path[i].x - state.lassoBoundingBox.x, path[i].y - state.lassoBoundingBox.y);
+    for (let y = 0; y < canvasH; y++) {
+      for (let x = 0; x < canvasW; x++) {
+        if (transformedMask[x + y * canvasW] !== 1) continue;
+        if (x < minX) minX = x;
+        if (x + 1 > maxX) maxX = x + 1;
+        if (y < minY) minY = y;
+        if (y + 1 > maxY) maxY = y + 1;
       }
-      maskCtx.closePath();
-    });
-    maskCtx.fill("evenodd");
-    
-    state.lassoPaths.forEach(path => {
-      if (!path) return;
-      for (let i = 0; i < path.length; i++) {
-        maskCtx.fillRect(path[i].x - state.lassoBoundingBox.x, path[i].y - state.lassoBoundingBox.y, 1, 1);
+    }
+
+    if (Number.isFinite(minX) && Number.isFinite(minY)) {
+      const w = maxX - minX;
+      const h = maxY - minY;
+      state.lassoBoundingBox = { x: minX, y: minY, w, h };
+
+      const maskCanvas = document.createElement('canvas');
+      maskCanvas.width = w; maskCanvas.height = h;
+      const maskCtx = maskCanvas.getContext('2d');
+      const imageData = maskCtx.createImageData(w, h);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (transformedMask[(x + minX) + (y + minY) * canvasW] !== 1) continue;
+          const idx = (x + y * w) * 4;
+          imageData.data[idx] = 255;
+          imageData.data[idx + 1] = 255;
+          imageData.data[idx + 2] = 255;
+          imageData.data[idx + 3] = 255;
+        }
       }
-    });
-    
-    state.lassoMaskCanvas = maskCanvas;
+      maskCtx.putImageData(imageData, 0, 0);
+      state.lassoMaskCanvas = maskCanvas;
+      state.selectionMask = transformedMask;
+    } else {
+      state.lassoActive = false;
+      state.lassoPath = [];
+      state.lassoPaths = [];
+      state.lassoBoundingBox = null;
+      state.lassoMaskCanvas = null;
+      state.selectionMask = null;
+    }
   }
   
   state.lassoSelectionCanvas = null;
@@ -1982,7 +2436,7 @@ function bakeFloatingSelectionOnly() {
   state.lassoCutPending     = false;
   
   // Re-generate the Uint8Array mask to keep everything fully synced
-  updateSelectionMask();
+  if (state.lassoMaskCanvas) updateSelectionMask();
   
   const btn = document.getElementById('btn-lasso-transform');
   if (btn) {
@@ -2042,66 +2496,133 @@ function updateBrushTip() {
   }
   ctx.putImageData(imgData, 0, 0);
   state.brushTipImageData = imgData;
+  state.brushTipDirty = false;
 }
 
-function alphaWeightedBoxBlur(imgData, size, radius) {
-  const data = imgData.data;
-  const width = size;
-  const height = size;
-  const outData = new Uint8ClampedArray(data.length);
-  
-  const passes = 2;
-  let currentData = data;
-  let nextData = outData;
-  
-  for (let pass = 0; pass < passes; pass++) {
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        let sumR = 0, sumG = 0, sumB = 0, sumA = 0, count = 0;
-        
-        for (let ky = -radius; ky <= radius; ky++) {
-          const ny = y + ky;
-          if (ny < 0 || ny >= height) continue;
-          
-          for (let kx = -radius; kx <= radius; kx++) {
-            const nx = x + kx;
-            if (nx < 0 || nx >= width) continue;
-            
-            const idx = (nx + ny * width) * 4;
-            const r = currentData[idx];
-            const g = currentData[idx+1];
-            const b = currentData[idx+2];
-            const a = currentData[idx+3];
-            
-            sumR += r * a;
-            sumG += g * a;
-            sumB += b * a;
-            sumA += a;
-            count++;
-          }
-        }
-        
-        const idx = (x + y * width) * 4;
-        if (sumA > 0) {
-          nextData[idx]   = Math.round(sumR / sumA);
-          nextData[idx+1] = Math.round(sumG / sumA);
-          nextData[idx+2] = Math.round(sumB / sumA);
-          nextData[idx+3] = Math.round(sumA / count);
-        } else {
-          nextData[idx]   = currentData[idx];
-          nextData[idx+1] = currentData[idx+1];
-          nextData[idx+2] = currentData[idx+2];
-          nextData[idx+3] = 0;
-        }
-      }
-    }
-    const temp = currentData;
-    currentData = nextData;
-    nextData = temp;
+function ensureBrushTip() {
+  const expectedSize = Math.max(1, Math.round(state.brushSize));
+  if (state.brushTipDirty || !state.brushTipCanvas ||
+      state.brushTipCanvas.width !== expectedSize || state.brushTipCanvas.height !== expectedSize) {
+    updateBrushTip();
   }
-  
-  if (currentData !== data) {
-    data.set(currentData);
+}
+
+function boxBlurHorizontal(source, target, width, height, leftRadius, rightRadius) {
+  const windowSize = leftRadius + rightRadius + 1;
+
+  for (let y = 0; y < height; y++) {
+    const rowStart = y * width;
+    let sumR = 0, sumG = 0, sumB = 0, sumA = 0;
+
+    for (let offset = -leftRadius; offset <= rightRadius; offset++) {
+      const x = Math.max(0, Math.min(width - 1, offset));
+      const index = (rowStart + x) * 4;
+      sumR += source[index];
+      sumG += source[index + 1];
+      sumB += source[index + 2];
+      sumA += source[index + 3];
+    }
+
+    for (let x = 0; x < width; x++) {
+      const targetIndex = (rowStart + x) * 4;
+      target[targetIndex] = Math.round(sumR / windowSize);
+      target[targetIndex + 1] = Math.round(sumG / windowSize);
+      target[targetIndex + 2] = Math.round(sumB / windowSize);
+      target[targetIndex + 3] = Math.round(sumA / windowSize);
+
+      const removeX = Math.max(0, Math.min(width - 1, x - leftRadius));
+      const addX = Math.max(0, Math.min(width - 1, x + rightRadius + 1));
+      const removeIndex = (rowStart + removeX) * 4;
+      const addIndex = (rowStart + addX) * 4;
+      sumR += source[addIndex] - source[removeIndex];
+      sumG += source[addIndex + 1] - source[removeIndex + 1];
+      sumB += source[addIndex + 2] - source[removeIndex + 2];
+      sumA += source[addIndex + 3] - source[removeIndex + 3];
+    }
+  }
+}
+
+function boxBlurVertical(source, target, width, height, topRadius, bottomRadius) {
+  const windowSize = topRadius + bottomRadius + 1;
+
+  for (let x = 0; x < width; x++) {
+    let sumR = 0, sumG = 0, sumB = 0, sumA = 0;
+
+    for (let offset = -topRadius; offset <= bottomRadius; offset++) {
+      const y = Math.max(0, Math.min(height - 1, offset));
+      const index = (x + y * width) * 4;
+      sumR += source[index];
+      sumG += source[index + 1];
+      sumB += source[index + 2];
+      sumA += source[index + 3];
+    }
+
+    for (let y = 0; y < height; y++) {
+      const targetIndex = (x + y * width) * 4;
+      target[targetIndex] = Math.round(sumR / windowSize);
+      target[targetIndex + 1] = Math.round(sumG / windowSize);
+      target[targetIndex + 2] = Math.round(sumB / windowSize);
+      target[targetIndex + 3] = Math.round(sumA / windowSize);
+
+      const removeY = Math.max(0, Math.min(height - 1, y - topRadius));
+      const addY = Math.max(0, Math.min(height - 1, y + bottomRadius + 1));
+      const removeIndex = (x + removeY * width) * 4;
+      const addIndex = (x + addY * width) * 4;
+      sumR += source[addIndex] - source[removeIndex];
+      sumG += source[addIndex + 1] - source[removeIndex + 1];
+      sumB += source[addIndex + 2] - source[removeIndex + 2];
+      sumA += source[addIndex + 3] - source[removeIndex + 3];
+    }
+  }
+}
+
+// Three separable box passes approximate a Gaussian kernel to within roughly
+// 3%, as recommended by the W3C SVG filter specification for sigma >= 2.
+function gaussianBlurImageData(imgData, width, height, sigma, reusableScratch = null) {
+  if (width < 1 || height < 1 || sigma <= 0) return;
+
+  const pixels = imgData.data;
+  const scratch = reusableScratch && reusableScratch.length === pixels.length
+    ? reusableScratch
+    : new Uint8ClampedArray(pixels.length);
+
+  // Blur premultiplied colors so transparent pixels cannot leak arbitrary RGB.
+  for (let index = 0; index < pixels.length; index += 4) {
+    const alpha = pixels[index + 3] / 255;
+    pixels[index] = Math.round(pixels[index] * alpha);
+    pixels[index + 1] = Math.round(pixels[index + 1] * alpha);
+    pixels[index + 2] = Math.round(pixels[index + 2] * alpha);
+  }
+
+  const diameter = Math.max(1, Math.floor(sigma * 3 * Math.sqrt(2 * Math.PI) / 4 + 0.5));
+  const passes = diameter % 2 === 1
+    ? [
+        { before: (diameter - 1) / 2, after: (diameter - 1) / 2 },
+        { before: (diameter - 1) / 2, after: (diameter - 1) / 2 },
+        { before: (diameter - 1) / 2, after: (diameter - 1) / 2 },
+      ]
+    : [
+        { before: diameter / 2, after: diameter / 2 - 1 },
+        { before: diameter / 2 - 1, after: diameter / 2 },
+        { before: diameter / 2, after: diameter / 2 },
+      ];
+
+  for (const pass of passes) {
+    boxBlurHorizontal(pixels, scratch, width, height, pass.before, pass.after);
+    boxBlurVertical(scratch, pixels, width, height, pass.before, pass.after);
+  }
+
+  for (let index = 0; index < pixels.length; index += 4) {
+    const alpha = pixels[index + 3];
+    if (alpha > 0) {
+      pixels[index] = Math.min(255, Math.round(pixels[index] * 255 / alpha));
+      pixels[index + 1] = Math.min(255, Math.round(pixels[index + 1] * 255 / alpha));
+      pixels[index + 2] = Math.min(255, Math.round(pixels[index + 2] * 255 / alpha));
+    } else {
+      pixels[index] = 0;
+      pixels[index + 1] = 0;
+      pixels[index + 2] = 0;
+    }
   }
 }
 
@@ -2207,73 +2728,44 @@ function drawBrushStamp(ctx, cx, cy, radius, size, brushCanvas) {
   }
 
   if (state.tool === 'brush' && state.isAltDrawing) {
-    const blurRadius = state.brushBlurRadius || 5;
-    const padding = blurRadius + 2;
-    const capturedSize = size + 2 * padding;
-    
-    // Bounding box for capture (centered at cx, cy)
-    const capX = Math.round(cx - radius - padding);
-    const capY = Math.round(cy - radius - padding);
-    
-    if (isNaN(capX) || isNaN(capY)) return;
-    
-    if (!state.blurSrcCanvas) {
-      state.blurSrcCanvas = document.createElement('canvas');
+    const blurRadius = Math.max(0.5, state.brushBlurRadius || 5);
+    // A Gaussian kernel is effectively contained within three standard deviations.
+    const padding = Math.ceil(blurRadius * 3) + 2;
+    const canvasWidth = ctx.canvas.width;
+    const canvasHeight = ctx.canvas.height;
+    const capX = Math.max(0, Math.floor(cx - radius - padding));
+    const capY = Math.max(0, Math.floor(cy - radius - padding));
+    const capRight = Math.min(canvasWidth, Math.ceil(cx + radius + padding));
+    const capBottom = Math.min(canvasHeight, Math.ceil(cy + radius + padding));
+    const capturedWidth = capRight - capX;
+    const capturedHeight = capBottom - capY;
+
+    if (capturedWidth <= 0 || capturedHeight <= 0) return;
+
+    const imgData = ctx.getImageData(capX, capY, capturedWidth, capturedHeight);
+    if (!state.blurOriginalPixels || state.blurOriginalPixels.length !== imgData.data.length) {
+      state.blurOriginalPixels = new Uint8ClampedArray(imgData.data.length);
+      state.blurScratchPixels = new Uint8ClampedArray(imgData.data.length);
     }
-    
-    if (state.blurSrcCanvas.width !== capturedSize || state.blurSrcCanvas.height !== capturedSize) {
-      state.blurSrcCanvas.width = capturedSize;
-      state.blurSrcCanvas.height = capturedSize;
-    }
-    
-    const srcCtx = state.blurSrcCanvas.getContext('2d', { willReadFrequently: true });
-    
-    let sx = capX;
-    let sy = capY;
-    let sw = capturedSize;
-    let sh = capturedSize;
-    
-    let dx = 0;
-    let dy = 0;
-    let dw = capturedSize;
-    let dh = capturedSize;
-    
-    const canvasW = ctx.canvas.width;
-    const canvasH = ctx.canvas.height;
-    
-    if (sx < 0) { dx = -sx; dw += sx; sw += sx; sx = 0; }
-    if (sy < 0) { dy = -sy; dh += sy; sh += sy; sy = 0; }
-    if (sx + sw > canvasW) { const diff = (sx + sw) - canvasW; sw -= diff; dw -= diff; }
-    if (sy + sh > canvasH) { const diff = (sy + sh) - canvasH; sh -= diff; dh -= diff; }
-    
-    if (sw <= 0 || sh <= 0) return; // Completely off-screen
-    
-    srcCtx.clearRect(0, 0, capturedSize, capturedSize);
-    srcCtx.drawImage(ctx.canvas, sx, sy, sw, sh, dx, dy, dw, dh);
-    
-    const imgData = srcCtx.getImageData(0, 0, capturedSize, capturedSize);
-    const originalData = new Uint8ClampedArray(imgData.data);
-    
-    alphaWeightedBoxBlur(imgData, capturedSize, blurRadius);
+    const originalData = state.blurOriginalPixels;
+    originalData.set(imgData.data);
+
+    gaussianBlurImageData(imgData, capturedWidth, capturedHeight, blurRadius, state.blurScratchPixels);
     const blurredData = imgData.data;
-    
+
     const strength = (state.brushBlurStrength !== undefined ? state.brushBlurStrength : 0.25) * (state.opacity !== undefined ? state.opacity : 1.0);
     const hardness = state.brushHardness !== undefined ? state.brushHardness : 100;
-    
-    for (let y = 0; y < capturedSize; y++) {
-      for (let x = 0; x < capturedSize; x++) {
+
+    for (let y = 0; y < capturedHeight; y++) {
+      for (let x = 0; x < capturedWidth; x++) {
         const px = capX + x;
         const py = capY + y;
-        
+
         let isSelected = true;
         if (state.lassoActive && state.selectionMask) {
-          if (px >= 0 && py >= 0 && px < canvasW && py < canvasH) {
-            isSelected = state.selectionMask[px + py * canvasW] === 1;
-          } else {
-            isSelected = false;
-          }
+          isSelected = state.selectionMask[px + py * canvasWidth] === 1;
         }
-        
+
         let amount = 0;
         if (isSelected) {
           const d_x = px - cx + 0.5;
@@ -2281,8 +2773,8 @@ function drawBrushStamp(ctx, cx, cy, radius, size, brushCanvas) {
           const mask = brushMask(d_x, d_y, radius, hardness / 100);
           amount = mask * strength;
         }
-        
-        const idx = (x + y * capturedSize) * 4;
+
+        const idx = (x + y * capturedWidth) * 4;
         if (amount > 0) {
           blurredData[idx]   = originalData[idx]   * (1 - amount) + blurredData[idx]   * amount;
           blurredData[idx+1] = originalData[idx+1] * (1 - amount) + blurredData[idx+1] * amount;
@@ -2296,7 +2788,7 @@ function drawBrushStamp(ctx, cx, cy, radius, size, brushCanvas) {
         }
       }
     }
-    
+
     ctx.putImageData(imgData, capX, capY);
   } else if (state.tool === 'eraser' && drawEraserStamp(ctx, cx, cy, brushCanvas)) {
     return;
@@ -2306,9 +2798,7 @@ function drawBrushStamp(ctx, cx, cy, radius, size, brushCanvas) {
 }
 
 function drawSoftBrushStroke(ctx, x0, y0, x1, y1) {
-  if (!state.brushTipCanvas) {
-    updateBrushTip();
-  }
+  if (!(state.tool === 'brush' && state.isAltDrawing)) ensureBrushTip();
   const brushCanvas = state.brushTipCanvas;
   const size = state.brushSize;
   const radius = size / 2;
@@ -2325,9 +2815,10 @@ function drawSoftBrushStroke(ctx, x0, y0, x1, y1) {
   ctx.globalAlpha = state.opacity;
   
   if (steps === 0) {
-    drawBrushStamp(ctx, x0, y0, radius, size, brushCanvas);
+    drawBrushStamp(ctx, x1, y1, radius, size, brushCanvas);
   } else {
-    for (let i = 0; i <= steps; i++) {
+    // The segment's starting point was already stamped by the previous event.
+    for (let i = 1; i <= steps; i++) {
       const t = i / steps;
       const cx = x0 + dx * t;
       const cy = y0 + dy * t;
@@ -2338,9 +2829,7 @@ function drawSoftBrushStroke(ctx, x0, y0, x1, y1) {
 }
 
 function drawSoftBrushQuadratic(ctx, p0, cp, p1, size) {
-  if (!state.brushTipCanvas) {
-    updateBrushTip();
-  }
+  if (!(state.tool === 'brush' && state.isAltDrawing)) ensureBrushTip();
   const brushCanvas = state.brushTipCanvas;
   const radius = size / 2;
   
@@ -2358,9 +2847,9 @@ function drawSoftBrushQuadratic(ctx, p0, cp, p1, size) {
   ctx.globalAlpha = state.opacity;
   
   if (steps === 0) {
-    drawBrushStamp(ctx, p0.x, p0.y, radius, size, brushCanvas);
+    drawBrushStamp(ctx, p1.x, p1.y, radius, size, brushCanvas);
   } else {
-    for (let i = 0; i <= steps; i++) {
+    for (let i = 1; i <= steps; i++) {
       const t = i / steps;
       const mt = 1 - t;
       const cx = mt * mt * p0.x + 2 * mt * t * cp.x + t * t * p1.x;
@@ -2485,23 +2974,11 @@ function startStroke(x, y) {
     beginEraserStroke(lctx);
   }
 
-  if (state.tool === 'brush' && state.isAltDrawing) {
-    if (!state.strokeSourceCanvas) {
-      state.strokeSourceCanvas = document.createElement('canvas');
-    }
-    state.strokeSourceCanvas.width = canvasW;
-    state.strokeSourceCanvas.height = canvasH;
-    const sctx = state.strokeSourceCanvas.getContext('2d');
-    sctx.clearRect(0, 0, canvasW, canvasH);
-    sctx.drawImage(lctx.canvas, 0, 0);
-  }
   if (isAliased1px()) {
     lctx.fillStyle = getDrawColor();
     lctx.fillRect(Math.floor(x), Math.floor(y), 1, 1);
   } else if (state.tool === 'brush' || state.tool === 'eraser') {
-    if (!state.brushTipCanvas) {
-      updateBrushTip();
-    }
+    if (!(state.tool === 'brush' && state.isAltDrawing)) ensureBrushTip();
     const radius = state.brushSize / 2;
     const prevAlpha = lctx.globalAlpha;
     lctx.globalAlpha = state.opacity;
@@ -2713,36 +3190,29 @@ function extractLassoSelection(providedMask = null, forceKeepFloating = false, e
 
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   const paths = state.lassoPaths && state.lassoPaths.length > 0 ? state.lassoPaths : (state.lassoPath && state.lassoPath.length > 2 ? [state.lassoPath] : []);
-  if (providedMask) {
-    for (let y = 0; y < canvasH; y++) {
-      for (let x = 0; x < canvasW; x++) {
-        if (providedMask[x + y * canvasW] === 1) {
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
-        }
+  // Existing stencil selections (magic wand, invert, expand/contract) already
+  // have an authoritative binary mask. Reuse it instead of rasterizing their
+  // display-only contour paths a second time.
+  const pixelMask = providedMask || state.selectionMask || rasterizeSelectionPaths(paths);
+  for (let y = 0; y < canvasH; y++) {
+    for (let x = 0; x < canvasW; x++) {
+      if (pixelMask[x + y * canvasW] === 1) {
+        if (x < minX) minX = x;
+        if (x + 1 > maxX) maxX = x + 1;
+        if (y < minY) minY = y;
+        if (y + 1 > maxY) maxY = y + 1;
       }
     }
-  } else {
-    paths.forEach(path => {
-      path.forEach(p => {
-        if (p.x < minX) minX = p.x;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.y > maxY) maxY = p.y;
-      });
-    });
   }
 
-  minX = Math.floor(Math.max(0, minX));
-  maxX = Math.ceil(Math.min(canvasW, maxX));
-  minY = Math.floor(Math.max(0, minY));
-  maxY = Math.ceil(Math.min(canvasH, maxY));
+  minX = Math.max(0, minX);
+  maxX = Math.min(canvasW, maxX);
+  minY = Math.max(0, minY);
+  maxY = Math.min(canvasH, maxY);
   const w = maxX - minX;
   const h = maxY - minY;
   
-  if (w < 4 || h < 4) {
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w < 1 || h < 1) {
     state.lassoActive = false;
     state.lassoPath = [];
     state.lassoPaths = [];
@@ -2771,46 +3241,24 @@ function extractLassoSelection(providedMask = null, forceKeepFloating = false, e
   maskCanvas.width = w || 1; maskCanvas.height = h || 1;
   const maskCtx = maskCanvas.getContext('2d');
   
-  if (providedMask) {
-    const tempImageData = maskCtx.createImageData(w || 1, h || 1);
-    const tempData = tempImageData.data;
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const val = providedMask[(x + minX) + (y + minY) * canvasW] === 1 ? 255 : 0;
-        const idx = (x + y * w) * 4;
-        tempData[idx] = val;
-        tempData[idx+1] = val;
-        tempData[idx+2] = val;
-        tempData[idx+3] = val;
-      }
+  const tempImageData = maskCtx.createImageData(w || 1, h || 1);
+  const tempData = tempImageData.data;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const val = pixelMask[(x + minX) + (y + minY) * canvasW] === 1 ? 255 : 0;
+      const idx = (x + y * w) * 4;
+      tempData[idx] = val;
+      tempData[idx+1] = val;
+      tempData[idx+2] = val;
+      tempData[idx+3] = val;
     }
-    maskCtx.putImageData(tempImageData, 0, 0);
-  } else {
-    maskCtx.fillStyle = 'white';
-    maskCtx.beginPath();
-    paths.forEach(path => {
-      if (!path || path.length < 2) return;
-      maskCtx.moveTo((path[0].x || 0) - minX, (path[0].y || 0) - minY);
-      for (let i = 1; i < path.length; i++) {
-        maskCtx.lineTo((path[i].x || 0) - minX, (path[i].y || 0) - minY);
-      }
-      maskCtx.closePath();
-    });
-    maskCtx.fill("evenodd");
-
-    // Fill the boundary pixels to prevent shrinkage
-    paths.forEach(path => {
-      if (!path) return;
-      for (let i = 0; i < path.length; i++) {
-        maskCtx.fillRect((path[i].x || 0) - minX, (path[i].y || 0) - minY, 1, 1);
-      }
-    });
   }
+  maskCtx.putImageData(tempImageData, 0, 0);
 
   const maskData = maskCtx.getImageData(0, 0, w, h).data;
 
   state.lassoMaskCanvas = maskCanvas;
-  updateSelectionMask(providedMask);
+  updateSelectionMask(pixelMask);
 
   // A newly-created selection is only a stencil. Keeping pixels in their
   // original layer makes selection itself completely non-destructive and
@@ -2964,6 +3412,200 @@ function traceMaskContours(mask) {
   return paths;
 }
 
+// Convert a binary pixel mask into paths that run on the OUTER edges of the
+// selected pixels. Unlike traceMaskContours(), these paths do not pass through
+// pixel centers, so the transform marquee can hug opaque artwork exactly.
+function tracePixelMaskEdges(mask, width, height, offsetX = 0, offsetY = 0) {
+  const edges = [];
+  const edgesByStart = new Map();
+
+  const addEdge = (x1, y1, x2, y2, direction) => {
+    const edge = { x1, y1, x2, y2, direction, visited: false };
+    edges.push(edge);
+    const key = `${x1},${y1}`;
+    if (!edgesByStart.has(key)) edgesByStart.set(key, []);
+    edgesByStart.get(key).push(edge);
+  };
+  const isSelected = (x, y) =>
+    x >= 0 && x < width && y >= 0 && y < height && mask[x + y * width] === 1;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (!isSelected(x, y)) continue;
+      if (!isSelected(x, y - 1)) addEdge(x, y, x + 1, y, 0);
+      if (!isSelected(x + 1, y)) addEdge(x + 1, y, x + 1, y + 1, 1);
+      if (!isSelected(x, y + 1)) addEdge(x + 1, y + 1, x, y + 1, 2);
+      if (!isSelected(x - 1, y)) addEdge(x, y + 1, x, y, 3);
+    }
+  }
+
+  const paths = [];
+  for (const firstEdge of edges) {
+    if (firstEdge.visited) continue;
+
+    const rawPath = [{ x: firstEdge.x1, y: firstEdge.y1 }];
+    let edge = firstEdge;
+    while (edge && !edge.visited) {
+      edge.visited = true;
+      rawPath.push({ x: edge.x2, y: edge.y2 });
+      if (edge.x2 === firstEdge.x1 && edge.y2 === firstEdge.y1) break;
+
+      const candidates = (edgesByStart.get(`${edge.x2},${edge.y2}`) || [])
+        .filter(candidate => !candidate.visited);
+      // At a diagonal pixel contact there can be two possible continuations.
+      // Keeping the selected pixels on the right separates the two contours.
+      const turnPriority = [1, 0, 3, 2]; // right, straight, left, back
+      const incomingDirection = rawPathDirection(rawPath);
+      edge = null;
+      for (const turn of turnPriority) {
+        edge = candidates.find(candidate =>
+          (candidate.direction - incomingDirection + 4) % 4 === turn
+        );
+        if (edge) break;
+      }
+    }
+
+    if (rawPath.length < 4) continue;
+
+    // Remove intermediate collinear vertices without changing pixel accuracy.
+    const closed = rawPath[0].x === rawPath[rawPath.length - 1].x &&
+      rawPath[0].y === rawPath[rawPath.length - 1].y;
+    if (!closed) continue;
+    const vertices = rawPath.slice(0, -1);
+    const simplified = vertices.filter((point, index) => {
+      const previous = vertices[(index - 1 + vertices.length) % vertices.length];
+      const next = vertices[(index + 1) % vertices.length];
+      return (point.x - previous.x) * (next.y - point.y) !==
+        (point.y - previous.y) * (next.x - point.x);
+    });
+    if (simplified.length < 3) continue;
+    const path = simplified.map(point => ({
+      x: point.x + offsetX,
+      y: point.y + offsetY
+    }));
+    path.push({ ...path[0] });
+    paths.push(path);
+  }
+
+  return paths;
+}
+
+function rawPathDirection(path) {
+  if (path.length < 2) return 0;
+  const a = path[path.length - 2];
+  const b = path[path.length - 1];
+  if (b.x > a.x) return 0;
+  if (b.y > a.y) return 1;
+  if (b.x < a.x) return 2;
+  return 3;
+}
+
+// Before Transform starts, replace the geometric selection with the exact set
+// of selected pixels whose alpha is non-zero. This also trims the floating
+// bitmap and its transform box, while preserving its current canvas position.
+function refineSelectionToOpaquePixels() {
+  if (!state.lassoActive || !state.lassoBoundingBox) return false;
+
+  if (state.lassoSelectionCanvas) {
+    const sourceCanvas = state.lassoSelectionCanvas;
+    const sourceCtx = sourceCanvas.getContext('2d');
+    const sourceData = sourceCtx.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
+    const sourcePixels = sourceData.data;
+    let minX = sourceCanvas.width, minY = sourceCanvas.height, maxX = -1, maxY = -1;
+
+    for (let y = 0; y < sourceCanvas.height; y++) {
+      for (let x = 0; x < sourceCanvas.width; x++) {
+        if (sourcePixels[(x + y * sourceCanvas.width) * 4 + 3] === 0) continue;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+    if (maxX < minX || maxY < minY) return false;
+
+    const width = maxX - minX + 1;
+    const height = maxY - minY + 1;
+    const croppedCanvas = document.createElement('canvas');
+    croppedCanvas.width = width;
+    croppedCanvas.height = height;
+    croppedCanvas.getContext('2d').putImageData(
+      sourceCtx.getImageData(minX, minY, width, height), 0, 0
+    );
+
+    const opaqueMask = new Uint8Array(width * height);
+    const croppedPixels = croppedCanvas.getContext('2d').getImageData(0, 0, width, height).data;
+    for (let i = 0; i < opaqueMask.length; i++) {
+      opaqueMask[i] = croppedPixels[i * 4 + 3] > 0 ? 1 : 0;
+    }
+
+    const bboxX = state.lassoBoundingBox.x + (state.lassoCurrentOffset.x || 0) + minX;
+    const bboxY = state.lassoBoundingBox.y + (state.lassoCurrentOffset.y || 0) + minY;
+    const paths = tracePixelMaskEdges(opaqueMask, width, height, bboxX, bboxY);
+    if (paths.length === 0) return false;
+
+    const maskCanvas = document.createElement('canvas');
+    maskCanvas.width = width;
+    maskCanvas.height = height;
+    const maskCtx = maskCanvas.getContext('2d');
+    const maskData = maskCtx.createImageData(width, height);
+    for (let i = 0; i < opaqueMask.length; i++) {
+      if (opaqueMask[i] !== 1) continue;
+      const index = i * 4;
+      maskData.data[index] = 255;
+      maskData.data[index + 1] = 255;
+      maskData.data[index + 2] = 255;
+      maskData.data[index + 3] = 255;
+    }
+    maskCtx.putImageData(maskData, 0, 0);
+
+    const canvasMask = new Uint8Array(canvasW * canvasH);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (opaqueMask[x + y * width] !== 1) continue;
+        const canvasX = bboxX + x;
+        const canvasY = bboxY + y;
+        if (canvasX >= 0 && canvasX < canvasW && canvasY >= 0 && canvasY < canvasH) {
+          canvasMask[canvasX + canvasY * canvasW] = 1;
+        }
+      }
+    }
+
+    state.lassoSelectionCanvas = croppedCanvas;
+    state.lassoMaskCanvas = maskCanvas;
+    state.lassoBoundingBox = { x: bboxX, y: bboxY, w: width, h: height };
+    state.lassoPaths = paths;
+    state.lassoPath = paths[0];
+    state.selectionMask = canvasMask;
+    state.lassoCurrentOffset = { x: 0, y: 0 };
+    state.lassoPrevOffset = { x: 0, y: 0 };
+    state.lassoStartOffset = { x: 0, y: 0 };
+    return true;
+  }
+
+  const lctx = getLCtx();
+  if (!lctx) return false;
+  const selectedMask = getExistingSelectionMask();
+  const layerPixels = lctx.getImageData(0, 0, canvasW, canvasH).data;
+  const opaqueMask = new Uint8Array(canvasW * canvasH);
+  let hasOpaquePixel = false;
+  for (let i = 0; i < opaqueMask.length; i++) {
+    if (selectedMask[i] === 1 && layerPixels[i * 4 + 3] > 0) {
+      opaqueMask[i] = 1;
+      hasOpaquePixel = true;
+    }
+  }
+  if (!hasOpaquePixel) return false;
+
+  const paths = tracePixelMaskEdges(opaqueMask, canvasW, canvasH);
+  if (paths.length === 0) return false;
+  state.lassoPaths = paths;
+  state.lassoPath = paths[0];
+  state.selectionMask = opaqueMask;
+  extractLassoSelection(opaqueMask, true, true);
+  return !!state.lassoSelectionCanvas;
+}
+
 function getCombinedLayersImageData() {
   const tempCanvas = document.createElement('canvas');
   tempCanvas.width = canvasW || 1;
@@ -3113,20 +3755,7 @@ function lassoPathSelect(closedPath, isShift, isAlt) {
     bakeLassoSelection(false);
   }
 
-  // Build new mask from the drawn polygon (same fill approach as original extractLassoSelection)
-  const newMaskCanvas = document.createElement('canvas');
-  newMaskCanvas.width = canvasW; newMaskCanvas.height = canvasH;
-  const nmctx = newMaskCanvas.getContext('2d');
-  nmctx.fillStyle = 'white';
-  nmctx.beginPath();
-  nmctx.moveTo(closedPath[0].x, closedPath[0].y);
-  for (let i = 1; i < closedPath.length; i++) nmctx.lineTo(closedPath[i].x, closedPath[i].y);
-  nmctx.closePath();
-  nmctx.fill();
-  for (let i = 0; i < closedPath.length; i++) nmctx.fillRect(closedPath[i].x, closedPath[i].y, 1, 1);
-  const newMaskData = nmctx.getImageData(0, 0, canvasW, canvasH).data;
-  const newMask = new Uint8Array(canvasW * canvasH);
-  for (let i = 0; i < newMask.length; i++) newMask[i] = newMaskData[i * 4 + 3] > 128 ? 1 : 0;
+  const newMask = rasterizeSelectionPaths([closedPath]);
 
   // Combine masks exactly like magicWandSelect
   const combinedMask = new Uint8Array(canvasW * canvasH);
@@ -3144,6 +3773,7 @@ function lassoPathSelect(closedPath, isShift, isAlt) {
     state.lassoPath = newPaths[0];
     state.lassoActive = true;
     extractLassoSelection(combinedMask);
+    refineSelectionToOpaquePixels();
     drawLassoSelectionOutline();
     compositeAll();
     saveHistory();
@@ -3727,9 +4357,10 @@ container.addEventListener('pointerdown', e => {
         state.isDrawing = true;
         state.lassoDragged = false;
         state.lassoDragAction = null;
-        state.lassoStartX = x;
-        state.lassoStartY = y;
-        state.lassoPath = [{ x, y }];
+        const snapped = snapSelectionPoint(x, y);
+        state.lassoStartX = snapped.x;
+        state.lassoStartY = snapped.y;
+        state.lassoPath = [snapped];
         if (!state.lassoShiftKey && !state.lassoAltKey) {
           state.lassoActive = false;
         }
@@ -3943,18 +4574,22 @@ container.addEventListener('pointermove', e => {
       compositeAll();
       drawLassoSelectionOutline();
     } else if (state.tool === 'lasso') {
+      const snapped = snapSelectionPoint(x, y);
       if (state.lassoType === 'rect') {
         const x0 = state.lassoStartX;
         const y0 = state.lassoStartY;
         state.lassoPath = [
           { x: x0, y: y0 },
-          { x: x, y: y0 },
-          { x: x, y: y },
-          { x: x0, y: y },
+          { x: snapped.x, y: y0 },
+          { x: snapped.x, y: snapped.y },
+          { x: x0, y: snapped.y },
           { x: x0, y: y0 }
         ];
       } else {
-        state.lassoPath.push({ x, y });
+        const last = state.lassoPath[state.lassoPath.length - 1];
+        if (!last || last.x !== snapped.x || last.y !== snapped.y) {
+          state.lassoPath.push(snapped);
+        }
       }
       drawLassoPreview();
     }
@@ -4044,7 +4679,6 @@ container.addEventListener('pointerup', e => {
     state.strokeLctx.restore();
     state.strokeLctx = null;
   }
-  state.strokeSourceCanvas = null; // Free snapshot canvas
   clearEraserStroke();
 
   // ── Lasso and Magic Wand pointerup ───────────────────────────────
@@ -4066,6 +4700,7 @@ container.addEventListener('pointerup', e => {
           state.lassoPaths = [state.lassoPath];
           state.lassoActive = true;
           extractLassoSelection();
+          refineSelectionToOpaquePixels();
           drawLassoSelectionOutline();
           saveHistory();
         }
@@ -4123,6 +4758,7 @@ container.addEventListener('pointerleave', e => {
         state.lassoPaths = [state.lassoPath];
         state.lassoActive = true;
         extractLassoSelection();
+        refineSelectionToOpaquePixels();
         drawLassoSelectionOutline();
         saveHistory();
       } else if (!state.lassoDragged) {
@@ -4195,6 +4831,7 @@ function selectAllSelection() {
   state.lassoPaths = [state.lassoPath];
   state.lassoActive = true;
   extractLassoSelection();
+  refineSelectionToOpaquePixels();
   drawLassoSelectionOutline();
   saveHistory();
 }
@@ -4431,8 +5068,13 @@ document.addEventListener('keydown', e => {
   // New canvas
   if ((e.ctrlKey || e.metaKey) && e.key === 'n') { e.preventDefault(); showNewCanvasModal(); }
 
-  // Save / Open project
-  if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveProject(); }
+  // Save image / Save Image As / Save Project
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+    e.preventDefault();
+    if (e.altKey) saveProject();
+    else if (e.shiftKey) saveImageAs();
+    else saveImage();
+  }
   if ((e.ctrlKey || e.metaKey) && e.key === 'o') { e.preventDefault(); openProject(); }
 
 
@@ -4457,7 +5099,7 @@ document.addEventListener('keydown', e => {
 
   // [ / ] brush size
   if (e.key === '[') { setBrushSize(Math.max(1, state.brushSize - 2)); }
-  if (e.key === ']') { setBrushSize(Math.min(200, state.brushSize + 2)); }
+  if (e.key === ']') { setBrushSize(Math.min(MAX_TOOL_SIZE, state.brushSize + 2)); }
 
   // X = swap colors (only without Ctrl/Meta to avoid conflict with Ctrl+X cut)
   if ((e.key === 'x' || e.key === 'X') && !e.ctrlKey && !e.metaKey) swapColors();
@@ -4649,6 +5291,50 @@ function importImageFile(file) {
 window.importImageFile = importImageFile;
 
 const imageFileInput = document.getElementById('image-input');
+const imageOpenInput = document.getElementById('image-open-input');
+document.getElementById('menu-open-images').addEventListener('click', async () => {
+  document.getElementById('menu-arquivo-dropdown').classList.remove('show');
+
+  if (window.showOpenFilePicker) {
+    try {
+      const handles = await window.showOpenFilePicker({
+        multiple: true,
+        types: [{
+          description: 'Image files',
+          accept: {
+            'image/png': ['.png'],
+            'image/jpeg': ['.jpg', '.jpeg'],
+            'image/webp': ['.webp'],
+            'image/gif': ['.gif'],
+            'image/bmp': ['.bmp'],
+            'image/avif': ['.avif'],
+            'image/svg+xml': ['.svg']
+          }
+        }]
+      });
+      for (const handle of handles) {
+        const file = await handle.getFile();
+        await openImageAsDocument(file, handle);
+      }
+      return;
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+      console.warn('Native image picker failed, using file input fallback:', err);
+    }
+  }
+
+  imageOpenInput.value = '';
+  imageOpenInput.click();
+});
+
+imageOpenInput.addEventListener('change', async () => {
+  const files = Array.from(imageOpenInput.files || []);
+  imageOpenInput.value = '';
+  for (const file of files) {
+    await openImageAsDocument(file);
+  }
+});
+
 document.getElementById('menu-import-image').addEventListener('click', () => {
   document.getElementById('menu-arquivo-dropdown').classList.remove('show');
   imageFileInput.value = '';
@@ -4711,6 +5397,8 @@ container.addEventListener('drop', async (event) => {
 
 // ─── Tool Selection ──────────────────────────────────────────────
 const SIZED_TOOLS = ['pencil', 'brush', 'eraser', 'line', 'rect', 'circle', 'curve'];
+const MIN_TOOL_SIZE = 1;
+const MAX_TOOL_SIZE = 2048;
 
 function setTool(tool) {
   // Bake any floating lasso/magicwand selection before leaving selection tools
@@ -4741,12 +5429,14 @@ function setTool(tool) {
 
   // Restore the new tool's individual size
   if (SIZED_TOOLS.includes(tool)) {
-    const sz = state.toolSizes[tool];
+    const sz = Math.max(MIN_TOOL_SIZE, Math.min(MAX_TOOL_SIZE,
+      Math.round(Number(state.toolSizes[tool]) || MIN_TOOL_SIZE)));
+    state.toolSizes[tool] = sz;
     state.brushSize = sz;
     const slider = document.getElementById('brush-size');
-    const label  = document.getElementById('brush-size-val');
+    const sizeInput = document.getElementById('brush-size-input');
     if (slider) slider.value = sz;
-    if (label)  label.textContent = sz + 'px';
+    if (sizeInput) sizeInput.value = sz;
   }
 
   document.querySelectorAll('.tool-btn').forEach(btn => {
@@ -4814,7 +5504,7 @@ function setTool(tool) {
       if (hardnessOpts) hardnessOpts.style.display = 'flex';
       if (spacingOpts) spacingOpts.style.display = 'flex';
     }
-    if (tool === 'brush' || tool === 'eraser') updateBrushTip();
+    if (tool === 'brush' || tool === 'eraser') state.brushTipDirty = true;
   }
   updateBlurOptionVisibility();
 }
@@ -4850,29 +5540,47 @@ if (btnLassoFree && btnLassoRect) {
 
 // ─── Brush Size ──────────────────────────────────────────────────
 const brushSizeSlider = document.getElementById('brush-size');
-const brushSizeVal    = document.getElementById('brush-size-val');
+const brushSizeInput  = document.getElementById('brush-size-input');
 
 function setBrushSize(v) {
-  state.brushSize = v;
-  brushSizeSlider.value = v;
-  brushSizeVal.textContent = v + 'px';
+  const parsedValue = Number(v);
+  if (!Number.isFinite(parsedValue)) return;
+  const size = Math.max(MIN_TOOL_SIZE, Math.min(MAX_TOOL_SIZE, Math.round(parsedValue)));
+  state.brushSize = size;
+  brushSizeSlider.value = size;
+  brushSizeInput.value = size;
   // Persist the new size into the per-tool memory
   if (SIZED_TOOLS.includes(state.tool)) {
-    state.toolSizes[state.tool] = v;
+    state.toolSizes[state.tool] = size;
     // Synced tools: pencil, line, curve share the same size
     if (['pencil', 'line', 'curve'].includes(state.tool)) {
-      state.toolSizes['pencil'] = v;
-      state.toolSizes['line'] = v;
-      state.toolSizes['curve'] = v;
+      state.toolSizes['pencil'] = size;
+      state.toolSizes['line'] = size;
+      state.toolSizes['curve'] = size;
     }
   }
-  updateBrushTip();
+  if (state.tool === 'brush' || state.tool === 'eraser') state.brushTipDirty = true;
 }
 
 brushSizeSlider.addEventListener('input', () => setBrushSize(parseInt(brushSizeSlider.value)));
 // Return focus to document after slider use so keyboard shortcuts keep working
 brushSizeSlider.addEventListener('pointerup', () => brushSizeSlider.blur());
 brushSizeSlider.addEventListener('change',    () => brushSizeSlider.blur());
+
+brushSizeInput.addEventListener('input', () => {
+  if (brushSizeInput.value !== '') setBrushSize(brushSizeInput.value);
+});
+brushSizeInput.addEventListener('change', () => {
+  setBrushSize(brushSizeInput.value === '' ? state.brushSize : brushSizeInput.value);
+  brushSizeInput.blur();
+});
+brushSizeInput.addEventListener('keydown', event => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    setBrushSize(brushSizeInput.value === '' ? state.brushSize : brushSizeInput.value);
+    brushSizeInput.blur();
+  }
+});
 
 // ─── Opacity ─────────────────────────────────────────────────────
 const opacitySlider = document.getElementById('brush-opacity');
@@ -4893,7 +5601,7 @@ if (hardnessSlider && hardnessVal) {
   hardnessSlider.addEventListener('input', () => {
     state.brushHardness = parseInt(hardnessSlider.value);
     hardnessVal.textContent = hardnessSlider.value + '%';
-    updateBrushTip();
+    state.brushTipDirty = true;
   });
   hardnessSlider.addEventListener('pointerup', () => hardnessSlider.blur());
   hardnessSlider.addEventListener('change',    () => hardnessSlider.blur());
@@ -4961,7 +5669,7 @@ if (allLayersToggle) {
 const antiAliasToggle = document.getElementById('anti-alias-toggle');
 if (antiAliasToggle) {
   antiAliasToggle.addEventListener('change', () => {
-    updateBrushTip();
+    state.brushTipDirty = true;
     antiAliasToggle.blur();
   });
 }
@@ -4977,7 +5685,7 @@ function setFgColor(hex) {
   colorPicker.value = hex;
   fgSwatch.style.background = hex;
   colorHexLabel.textContent = hex.toUpperCase();
-  updateBrushTip();
+  state.brushTipDirty = true;
 }
 
 function setBgColor(hex) {
@@ -5071,13 +5779,7 @@ document.getElementById('modal-create').addEventListener('click', () => {
   const w  = parseInt(document.getElementById('new-width').value) || 1280;
   const h  = parseInt(document.getElementById('new-height').value) || 720;
   const bg = document.getElementById('new-bg').value;
-  state.history = [];
-  state.redoStack = [];
-  window.currentProjectHandle = null; // new project — next save must ask for location
-  window.currentProjectName = null;
-  document.title = 'Illustra — Illustration Software';
-  initCanvas(w, h, bg);
-  setBgColor(bg);
+  createBlankDocument(w, h, bg);
   document.getElementById('modal-overlay').classList.add('hidden');
 });
 
@@ -5441,26 +6143,165 @@ function showToast(message) {
 
 
 
-// ─── Save Image As ────────────────────────────────────────────────
-document.getElementById('menu-save-image').addEventListener('click', () => {
-  menuArquivo.classList.remove('show');
-  state.isExporting = true;
-  compositeAll();
-  mainCanvas.toBlob(async (blob) => {
-    state.isExporting = false;
-    compositeAll();
-    if (!blob) return;
-    const defaultName = 'canvas_frame.png';
-    const saved = await saveFileWithPicker(blob, defaultName, 'image/png');
-    if (!saved) {
-      // Fallback
-      const link = document.createElement('a');
-      link.download = defaultName;
-      link.href = URL.createObjectURL(blob);
-      link.click();
+// ─── Image Save / Save As ─────────────────────────────────────────
+const WRITABLE_IMAGE_TYPES = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp'
+};
+
+function getWritableImageType(fileName, preferredType = null) {
+  const extension = String(fileName || '').match(/\.([^.]+)$/)?.[1]?.toLowerCase();
+  if (extension && WRITABLE_IMAGE_TYPES[extension]) return WRITABLE_IMAGE_TYPES[extension];
+  return Object.values(WRITABLE_IMAGE_TYPES).includes(preferredType) ? preferredType : null;
+}
+
+function getSuggestedImageName() {
+  const doc = getActiveDocument();
+  const currentName = doc?.imageName || doc?.name || 'canvas_frame.png';
+  if (getWritableImageType(currentName)) return currentName;
+  const baseName = currentName.replace(/\.[^.]+$/, '') || 'canvas_frame';
+  return `${baseName}.png`;
+}
+
+function renderCurrentImageBlob(type) {
+  return new Promise((resolve, reject) => {
+    const wasExporting = state.isExporting;
+    const restoreCanvas = () => {
+      state.isExporting = wasExporting;
+      compositeAll();
+    };
+
+    try {
+      state.isExporting = true;
+      compositeAll();
+      mainCanvas.toBlob(blob => {
+        restoreCanvas();
+        if (blob) resolve(blob);
+        else reject(new Error(`Could not encode image as ${type}`));
+      }, type, 0.95);
+    } catch (err) {
+      restoreCanvas();
+      reject(err);
     }
-  }, 'image/png');
-});
+  });
+}
+
+async function ensureImageWritePermission(handle) {
+  try {
+    if (typeof handle.queryPermission !== 'function') return true;
+    let permission = await handle.queryPermission({ mode: 'readwrite' });
+    if (permission === 'granted') return true;
+    if (typeof handle.requestPermission !== 'function') return false;
+    permission = await handle.requestPermission({ mode: 'readwrite' });
+    return permission === 'granted';
+  } catch (err) {
+    console.warn('Could not get image write permission:', err);
+    return false;
+  }
+}
+
+function rememberImageDestination(handle, name, type) {
+  const doc = getActiveDocument();
+  if (!doc) return;
+  doc.kind = 'image';
+  doc.imageHandle = handle || null;
+  doc.imageName = name;
+  doc.imageType = type;
+  doc.name = name;
+  captureActiveDocument();
+  document.title = `Illustra (${name})`;
+  renderDocumentTabs();
+}
+
+function downloadImageBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.download = fileName;
+  link.href = url;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function saveImage() {
+  menuArquivo.classList.remove('show');
+  const doc = getActiveDocument();
+  const handle = doc?.imageHandle;
+  const type = getWritableImageType(handle?.name || doc?.imageName, doc?.imageType);
+
+  // Images opened through the native picker retain a writable handle. New
+  // canvases and formats Canvas cannot encode safely start with Save As.
+  if (!handle || !type) {
+    await saveImageAs();
+    return;
+  }
+
+  if (!await ensureImageWritePermission(handle)) {
+    await saveImageAs();
+    return;
+  }
+
+  try {
+    const blob = await renderCurrentImageBlob(type);
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    rememberImageDestination(handle, handle.name, type);
+    showToast('💾 Image saved!');
+  } catch (err) {
+    console.warn('Direct image save failed, opening Save As:', err);
+    showToast('⚠️ Could not overwrite the original image');
+    await saveImageAs();
+  }
+}
+
+async function saveImageAs() {
+  menuArquivo.classList.remove('show');
+  const suggestedName = getSuggestedImageName();
+
+  if (window.showSaveFilePicker) {
+    try {
+      // Open the picker before rendering so keyboard-triggered saves keep the
+      // browser's user activation required by the File System Access API.
+      const handle = await window.showSaveFilePicker({
+        suggestedName,
+        types: [
+          { description: 'PNG Image', accept: { 'image/png': ['.png'] } },
+          { description: 'JPEG Image', accept: { 'image/jpeg': ['.jpg', '.jpeg'] } },
+          { description: 'WebP Image', accept: { 'image/webp': ['.webp'] } }
+        ]
+      });
+      const type = getWritableImageType(handle.name) || 'image/png';
+      const blob = await renderCurrentImageBlob(type);
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      rememberImageDestination(handle, handle.name, type);
+      showToast('💾 Image saved!');
+      return;
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+      console.warn('Save Image As picker failed, using download fallback:', err);
+    }
+  }
+
+  try {
+    const type = getWritableImageType(suggestedName) || 'image/png';
+    const blob = await renderCurrentImageBlob(type);
+    downloadImageBlob(blob, suggestedName);
+    rememberImageDestination(null, suggestedName, type);
+    showToast('💾 Image downloaded!');
+  } catch (err) {
+    console.error('Image save failed:', err);
+    showToast('❌ Could not save image');
+  }
+}
+
+document.getElementById('menu-save').addEventListener('click', saveImage);
+document.getElementById('menu-save-image').addEventListener('click', saveImageAs);
+window.saveImage = saveImage;
+window.saveImageAs = saveImageAs;
 
 
 
@@ -6346,6 +7187,7 @@ setFgColor('#000000');
 setBgColor('#ffffff');
 setTool('pencil');
 setBrushSize(1);
+registerInitialDocument();
 
 // ─── Timeline Resizer (Height Splitter) ──────────────────────────
 const timelineElement = document.getElementById('timeline');
@@ -6447,7 +7289,12 @@ if (btnLassoTransform) {
     if ((state.tool === 'lasso' || state.tool === 'magicwand') && state.lassoActive) {
       state.lassoTransformMode = !state.lassoTransformMode;
       if (state.lassoTransformMode) {
-        if (!state.lassoSelectionCanvas) {
+        const canRefineOpaquePixels = Math.abs(state.lassoRotation || 0) < 0.000001 &&
+          Math.abs((state.lassoScaleX ?? 1) - 1) < 0.000001 &&
+          Math.abs((state.lassoScaleY ?? 1) - 1) < 0.000001;
+        if (canRefineOpaquePixels) {
+          refineSelectionToOpaquePixels();
+        } else if (!state.lassoSelectionCanvas) {
           extractLassoSelection(state.selectionMask, true, true);
         }
         btnLassoTransform.classList.add('active');

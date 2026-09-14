@@ -95,6 +95,9 @@
         await writable.write(blob);
         await writable.close();
         showToast('💾 Project saved!');
+        if (window.updateCurrentDocumentTab) {
+          window.updateCurrentDocumentTab(window.currentProjectName, window.currentProjectHandle);
+        }
         await addRecentProject(window.currentProjectName, window.currentProjectHandle);
         updateRecentProjectsList();
       } catch (err) {
@@ -137,6 +140,9 @@
         const projectName = handle.name.replace(/\.tjl$/i, '');
         window.currentProjectName = projectName;
         document.title = `Illustra (${projectName})`;
+        if (window.updateCurrentDocumentTab) {
+          window.updateCurrentDocumentTab(projectName, handle);
+        }
         
         showToast('💾 Project saved!');
         await addRecentProject(projectName, handle);
@@ -158,6 +164,9 @@
     if (!window.currentProjectName) {
       window.currentProjectName = 'project';
       document.title = 'Illustra (project)';
+    }
+    if (window.updateCurrentDocumentTab) {
+      window.updateCurrentDocumentTab(window.currentProjectName, window.currentProjectHandle);
     }
 
     showToast('💾 Project downloaded!');
@@ -252,17 +261,20 @@
           multiple: false
         });
 
-        // Request write permission IMMEDIATELY while user gesture is active
+        // Request write permission IMMEDIATELY while user gesture is active.
+        // Keep it local until the new document tab has been created so the
+        // currently active tab does not accidentally inherit this handle.
+        let projectHandle = null;
         try {
           const perm = await handle.requestPermission({ mode: 'readwrite' });
-          window.currentProjectHandle = (perm === 'granted') ? handle : null;
+          projectHandle = (perm === 'granted') ? handle : null;
         } catch (err) {
           console.warn('Failed to request readwrite permission immediately:', err);
-          window.currentProjectHandle = handle;
+          projectHandle = handle;
         }
 
         const file = await handle.getFile();
-        await loadProjectFile(file);
+        await loadProjectFile(file, null, projectHandle);
         return;
       } catch (err) {
         if (err.name === 'AbortError') return; // user cancelled
@@ -271,11 +283,10 @@
     }
 
     // Fallback: hidden <input type="file"> — no write handle available
-    window.currentProjectHandle = null;
     document.getElementById('project-open-input').click();
   }
 
-  async function loadProjectFile(file, name) {
+  async function loadProjectFile(file, name, projectHandle = null) {
     let project;
     try {
       const text = await file.text();
@@ -291,15 +302,16 @@
       return;
     }
 
-    // Update project name and title bar
+    // Resolve metadata, then create a new document tab before replacing the
+    // global canvas/layer references with the loaded project.
+    let projectName = name || 'Project';
     if (file && file.name) {
-      const projectName = file.name.replace(/\.tjl$/i, '');
-      window.currentProjectName = projectName;
-      document.title = `Illustra (${projectName})`;
-    } else if (name) {
-      window.currentProjectName = name;
-      document.title = `Illustra (${name})`;
+      projectName = file.name.replace(/\.tjl$/i, '');
     }
+    if (window.beginDocumentLoad) window.beginDocumentLoad(projectName, projectHandle);
+    window.currentProjectHandle = projectHandle;
+    window.currentProjectName = projectName;
+    document.title = `Illustra (${projectName})`;
 
     // Stop playback
     if (state.isPlaying) pause();
@@ -313,6 +325,9 @@
     mainCanvas.height = h;
     previewCanvas.width  = w;
     previewCanvas.height = h;
+    selectionOverlay.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    selectionOverlay.style.width = `${w}px`;
+    selectionOverlay.style.height = `${h}px`;
     document.getElementById('canvas-size-display').textContent = `${w} × ${h} px`;
 
     // Timeline settings
@@ -465,8 +480,11 @@
       renderLayerPanel();
       renderTimeline();
       compositeAll();
-      applyTransform();
+      centerCanvas();
       if (typeof saveHistory === 'function') saveHistory();
+      if (window.finishDocumentLoad) {
+        window.finishDocumentLoad(projectName, projectHandle);
+      }
       showToast('📂 Project loaded!');
       await addRecentProject(window.currentProjectName, window.currentProjectHandle);
       updateRecentProjectsList();
@@ -479,7 +497,7 @@
   // Hook the hidden file input fallback
   document.getElementById('project-open-input').addEventListener('change', async (e) => {
     const file = e.target.files[0];
-    if (file) await loadProjectFile(file);
+    if (file) await loadProjectFile(file, null, null);
     e.target.value = ''; // reset
   });
 
@@ -620,9 +638,8 @@
               throw new Error('Permission denied');
             }
           }
-          window.currentProjectHandle = handle;
           const file = await handle.getFile();
-          await loadProjectFile(file, name);
+          await loadProjectFile(file, name, handle);
           await addRecentProject(name, handle);
           updateRecentProjectsList();
           return;
@@ -632,8 +649,7 @@
       }
 
       if (entry.projectBlob) {
-        window.currentProjectHandle = entry.fileHandle || null;
-        await loadProjectFile(entry.projectBlob, name);
+        await loadProjectFile(entry.projectBlob, name, entry.fileHandle || null);
         await addRecentProject(name, window.currentProjectHandle);
         updateRecentProjectsList();
       } else {

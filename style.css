@@ -81,6 +81,98 @@ body { font-family: var(--font); color: var(--text-primary); }
   z-index: 100;
 }
 
+/* ─── Document Tabs ─────────────────────────────────────────── */
+#document-tabs {
+  display: flex;
+  align-items: flex-end;
+  min-height: 34px;
+  padding: 5px 8px 0;
+  gap: 3px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex-shrink: 0;
+  background: var(--bg-dark);
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: thin;
+  scrollbar-color: var(--bg-active) transparent;
+  z-index: 90;
+}
+
+#document-tabs::-webkit-scrollbar { height: 4px; }
+#document-tabs::-webkit-scrollbar-thumb {
+  background: var(--bg-active);
+  border-radius: 999px;
+}
+
+.document-tab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 132px;
+  max-width: 240px;
+  height: 29px;
+  padding: 0 7px 0 10px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 7px 7px 0 0;
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-family: var(--font);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+  flex: 0 0 auto;
+}
+
+.document-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+}
+
+.document-tab.active {
+  background: var(--bg-elevated);
+  border-color: var(--border-light);
+  color: var(--text-primary);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.document-tab-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: var(--accent-2);
+}
+
+.document-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  text-align: left;
+}
+
+.document-tab-close {
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font: 15px/1 var(--font);
+  cursor: pointer;
+  opacity: 0;
+  transition: var(--transition);
+}
+
+.document-tab:hover .document-tab-close,
+.document-tab.active .document-tab-close { opacity: 1; }
+.document-tab-close:hover {
+  background: rgba(248, 113, 113, 0.15);
+  color: var(--danger);
+}
+
 .topbar-left  { display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
 .topbar-center{ display: flex; align-items: center; flex: 1; justify-content: center; }
 .topbar-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
@@ -142,6 +234,25 @@ body { font-family: var(--font); color: var(--text-primary); }
 }
 .tool-options input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.2); }
 .tool-options span { min-width: 34px; font-weight: 500; color: var(--text-primary); font-size: 11px; }
+.size-value-control {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.tool-options input[type=number] {
+  width: 66px;
+  height: 25px;
+  padding: 2px 5px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  outline: none;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font: 500 11px var(--font);
+  text-align: right;
+}
+.tool-options input[type=number]:focus { border-color: var(--accent); }
+.size-value-control span { min-width: 16px; }
 .zoom-indicator {
   font-size: 12px;
   font-weight: 600;
