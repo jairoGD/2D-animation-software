@@ -34,16 +34,5 @@ The editor also includes tools for creating repeating textures and tiles, useful
 
 This project was created as a simple personal alternative to heavier drawing and animation software, focused mainly on workflows useful for game development.
 
-## Run
 
-Open the project in a modern web browser.
 
-No installation is required when using the hosted version.
-
-## Source
-
-The project is open source and available on GitHub.
-
-## License
-
-Check the repository license for usage and distribution terms.
