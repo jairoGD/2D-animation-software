@@ -32,6 +32,8 @@ const state = {
   toolSizes: { pencil: 1, brush: 16, eraser: 24, line: 1, rect: 4, circle: 4, curve: 1 },
   opacity: 1,
   bucketThreshold: 30,
+  bucketGapTolerance: 0,
+  wandSelectSimilar: false,
   zoom: 1,
   panX: 0,
   panY: 0,
@@ -115,6 +117,14 @@ let canvasH = 512;
 let layers        = [];   // array of { id, name, visible, opacity, frames: [{ canvas, ctx, isKeyframe }] }
 let layerIdCount  = 1;
 let activeLayerIdx = 0;
+
+// Each open document keeps its own references to layers, history, selection,
+// timeline and viewport state. The visible canvases are reused when switching
+// tabs, then repainted from the selected document.
+const openDocuments = [];
+let activeDocumentId = null;
+let documentIdCounter = 1;
+let untitledDocumentCounter = 1;
 
 function getLCtx() {
   const f = layers[activeLayerIdx]?.frames[state.currentFrame];
@@ -432,30 +442,7 @@ function compositeAll() {
         if (state.colorAdjustPreview && 
             (state.colorAdjustPreview.allLayers || l === layers[activeLayerIdx]) &&
             !state.lassoActive) {
-          const mosaic = state.colorAdjustPreview.mosaic || 1;
-          if (mosaic > 1) {
-            const tempCanvas = document.createElement('canvas');
-            tempCanvas.width = canvasW;
-            tempCanvas.height = canvasH;
-            const tempCtx = tempCanvas.getContext('2d');
-            tempCtx.filter = state.colorAdjustPreview.filterString;
-            tempCtx.drawImage(f.canvas, 0, 0);
-
-            const tinyCanvas = document.createElement('canvas');
-            tinyCanvas.width = Math.max(1, Math.floor(canvasW / mosaic));
-            tinyCanvas.height = Math.max(1, Math.floor(canvasH / mosaic));
-            const tinyCtx = tinyCanvas.getContext('2d');
-            tinyCtx.imageSmoothingEnabled = false;
-            tinyCtx.drawImage(tempCanvas, 0, 0, tinyCanvas.width, tinyCanvas.height);
-
-            tempCtx.clearRect(0, 0, canvasW, canvasH);
-            tempCtx.imageSmoothingEnabled = false;
-            tempCtx.drawImage(tinyCanvas, 0, 0, canvasW, canvasH);
-
-            sourceCanvas = tempCanvas;
-          } else {
-            displayCtx.filter = state.colorAdjustPreview.filterString;
-          }
+          sourceCanvas = renderColorAdjustment(sourceCanvas, state.colorAdjustPreview);
         }
         
         const blendMode = l.blendMode || 'source-over';
@@ -518,29 +505,12 @@ function compositeAll() {
               state.lassoBoundingBox.y + state.lassoCurrentOffset.y
             );
           } else if (state.colorAdjustPreview) {
-            const filterCanvas = document.createElement('canvas');
-            filterCanvas.width = state.lassoSelectionCanvas.width;
-            filterCanvas.height = state.lassoSelectionCanvas.height;
+            const filterCanvas = renderColorAdjustment(state.lassoSelectionCanvas, {
+              ...state.colorAdjustPreview, previewCache: null
+            });
             const filterCtx = filterCanvas.getContext('2d');
-            filterCtx.filter = state.colorAdjustPreview.filterString;
-            filterCtx.drawImage(state.lassoSelectionCanvas, 0, 0);
-            
-            const mosaic = state.colorAdjustPreview.mosaic || 1;
-            if (mosaic > 1) {
-              const tinyCanvas = document.createElement('canvas');
-              tinyCanvas.width = Math.max(1, Math.floor(filterCanvas.width / mosaic));
-              tinyCanvas.height = Math.max(1, Math.floor(filterCanvas.height / mosaic));
-              const tinyCtx = tinyCanvas.getContext('2d');
-              tinyCtx.imageSmoothingEnabled = false;
-              tinyCtx.drawImage(filterCanvas, 0, 0, tinyCanvas.width, tinyCanvas.height);
-              
-              filterCtx.clearRect(0, 0, filterCanvas.width, filterCanvas.height);
-              filterCtx.imageSmoothingEnabled = false;
-              filterCtx.drawImage(tinyCanvas, 0, 0, filterCanvas.width, filterCanvas.height);
-            }
 
             if (state.lassoMaskCanvas) {
-              filterCtx.filter = 'none';
               filterCtx.globalCompositeOperation = 'destination-in';
               filterCtx.drawImage(state.lassoMaskCanvas, 0, 0);
             }
@@ -595,6 +565,18 @@ function updateTileCanvas() {
 
 // ─── Layers ──────────────────────────────────────────────────────
 function addLayer(name) {
+  // A floating selection temporarily owns pixels removed from the active
+  // layer. Commit them before inserting a layer at the active index, otherwise
+  // the same index starts pointing at the new layer and the source keeps a
+  // permanent transparent hole.
+  if (state.lassoActive) {
+    if (state.lassoSelectionCanvas) {
+      bakeLassoSelection(false);
+    } else {
+      _clearLassoStateOnly();
+    }
+  }
+
   const l = createLayerData(name);
   layers.splice(activeLayerIdx, 0, l);
   renderLayerPanel();
@@ -683,7 +665,10 @@ function mergeActiveLayerDown() {
 
 function deleteActiveLayer() {
   if (layers.length <= 1) return;
-  layers.splice(activeLayerIdx, 1);
+  const [removedLayer] = layers.splice(activeLayerIdx, 1);
+  if (removedLayer?.isVideo && typeof window.disposeVideoElement === 'function') {
+    window.disposeVideoElement(removedLayer.video);
+  }
   activeLayerIdx = Math.max(0, activeLayerIdx - 1);
   renderLayerPanel();
   renderTimeline();
@@ -1446,6 +1431,376 @@ function initCanvas(w, h, bgColor = '#ffffff') {
   document.getElementById('canvas-size-display').textContent = `${w} × ${h} px`;
 }
 
+// ─── Multi-document Tabs ────────────────────────────────────────
+const DOCUMENT_STATE_KEYS = [
+  'tool', 'fgColor', 'bgColor', 'bgMode', 'brushSize', 'brushHardness',
+  'brushSpacing', 'brushBlurRadius', 'brushBlurStrength', 'toolSizes',
+  'opacity', 'bucketThreshold', 'bucketGapTolerance', 'wandSelectSimilar', 'zoom', 'panX', 'panY', 'currentFrame',
+  'totalFrames', 'fps', 'loop', 'onionSkin', 'history', 'redoStack',
+  'lassoType', 'lassoPath', 'lassoPaths', 'lassoActive', 'lassoAnimState',
+  'lassoSelectionCanvas', 'lassoMaskCanvas', 'lassoBoundingBox',
+  'lassoCurrentOffset', 'lassoPrevOffset', 'lassoStartOffset',
+  'lassoDragged', 'lassoTransformMode', 'lassoScaleX', 'lassoScaleY',
+  'lassoRotation', 'lassoScaleCorner', 'lassoScalePivot', 'lassoDragStart',
+  'lassoBaseScale', 'lassoBaseScaleX', 'lassoBaseScaleY',
+  'lassoBaseRotation', 'selectionMask', 'lassoCutPending', 'allLayersActive',
+  'viewTile', 'viewFlipX', 'viewFlipY', 'shiftAnchor', 'curveStep',
+  'curvePoints'
+];
+
+function getActiveDocument() {
+  return openDocuments.find(doc => doc.id === activeDocumentId) || null;
+}
+
+function captureActiveDocument() {
+  const doc = getActiveDocument();
+  if (!doc) return;
+
+  doc.canvasW = canvasW;
+  doc.canvasH = canvasH;
+  doc.layers = layers;
+  doc.layerIdCount = layerIdCount;
+  doc.activeLayerIdx = activeLayerIdx;
+  doc.projectHandle = window.currentProjectHandle || null;
+  doc.projectName = window.currentProjectName || null;
+  doc.runtime = {};
+  DOCUMENT_STATE_KEYS.forEach(key => {
+    doc.runtime[key] = state[key];
+  });
+}
+
+function resetDocumentRuntime() {
+  state.history = [];
+  state.redoStack = [];
+  state.currentFrame = 0;
+  state.totalFrames = 24;
+  state.fps = 12;
+  state.loop = true;
+  state.onionSkin = false;
+  state.zoom = 1;
+  state.panX = 0;
+  state.panY = 0;
+  state.viewTile = false;
+  state.viewFlipX = false;
+  state.viewFlipY = false;
+  state.shiftAnchor = null;
+  state.curveStep = 0;
+  state.curvePoints = [];
+  state.isPlaying = false;
+  state.isDrawing = false;
+  state.isPanning = false;
+  state.isMovingAllBitmaps = false;
+  state.colorAdjustPreview = null;
+  state.colorRampPreview = null;
+  state.lassoActive = false;
+  state.lassoPath = [];
+  state.lassoPaths = [];
+  state.lassoSelectionCanvas = null;
+  state.lassoMaskCanvas = null;
+  state.lassoBoundingBox = null;
+  state.lassoCurrentOffset = { x: 0, y: 0 };
+  state.lassoPrevOffset = { x: 0, y: 0 };
+  state.lassoStartOffset = { x: 0, y: 0 };
+  state.lassoDragged = false;
+  state.lassoTransformMode = false;
+  state.lassoScaleX = 1;
+  state.lassoScaleY = 1;
+  state.lassoRotation = 0;
+  state.selectionMask = null;
+  state.toolSizes = { ...state.toolSizes };
+  layers = [];
+  layerIdCount = 1;
+  activeLayerIdx = 0;
+  pctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+  selectionOverlay.replaceChildren();
+}
+
+function beginDocumentSession(label, projectHandle = null, projectName = null, kind = 'project') {
+  if (state.isPlaying && typeof pause === 'function') pause();
+  captureActiveDocument();
+  resetDocumentRuntime();
+
+  const doc = {
+    id: documentIdCounter++,
+    name: label || `Untitled ${untitledDocumentCounter++}`,
+    kind,
+    projectHandle,
+    projectName,
+    imageHandle: null,
+    imageName: null,
+    imageType: null,
+    runtime: null,
+    layers: []
+  };
+  openDocuments.push(doc);
+  activeDocumentId = doc.id;
+  window.currentProjectHandle = projectHandle;
+  window.currentProjectName = projectName;
+  renderDocumentTabs();
+  return doc;
+}
+
+function finishCurrentDocument(label = null, projectHandle = window.currentProjectHandle,
+  projectName = window.currentProjectName) {
+  const doc = getActiveDocument();
+  if (!doc) return;
+  if (label) doc.name = label;
+  doc.projectHandle = projectHandle || null;
+  doc.projectName = projectName || null;
+  window.currentProjectHandle = doc.projectHandle;
+  window.currentProjectName = doc.projectName;
+  captureActiveDocument();
+  document.title = `Illustra (${doc.name})`;
+  renderDocumentTabs();
+}
+
+function syncDocumentUi() {
+  mainCanvas.width = canvasW;
+  mainCanvas.height = canvasH;
+  previewCanvas.width = canvasW;
+  previewCanvas.height = canvasH;
+  selectionOverlay.setAttribute('viewBox', `0 0 ${canvasW} ${canvasH}`);
+  selectionOverlay.style.width = `${canvasW}px`;
+  selectionOverlay.style.height = `${canvasH}px`;
+  document.getElementById('canvas-size-display').textContent = `${canvasW} × ${canvasH} px`;
+
+  const fpsInput = document.getElementById('timeline-fps');
+  const framesInput = document.getElementById('timeline-total-frames');
+  const loopInput = document.getElementById('timeline-loop');
+  const onionButton = document.getElementById('btn-onion');
+  if (fpsInput) fpsInput.value = state.fps;
+  if (framesInput) framesInput.value = state.totalFrames;
+  if (loopInput) loopInput.checked = state.loop;
+  if (onionButton) onionButton.classList.toggle('active', state.onionSkin);
+
+  document.querySelectorAll('input[name="bgMode"]').forEach(radio => {
+    radio.checked = radio.value === state.bgMode;
+  });
+  const allLayersCheckbox = document.getElementById('all-layers-toggle');
+  if (allLayersCheckbox) allLayersCheckbox.checked = state.allLayersActive;
+  const bucketGapSlider = document.getElementById('bucket-gap-tolerance');
+  const bucketGapValue = document.getElementById('bucket-gap-tolerance-val');
+  if (bucketGapSlider) bucketGapSlider.value = state.bucketGapTolerance;
+  if (bucketGapValue) bucketGapValue.textContent = `${state.bucketGapTolerance}px`;
+  const wandSelectSimilarCheckbox = document.getElementById('wand-select-similar');
+  if (wandSelectSimilarCheckbox) wandSelectSimilarCheckbox.checked = state.wandSelectSimilar;
+  ['viewTile', 'viewFlipX', 'viewFlipY'].forEach((key, index) => {
+    const ids = ['menu-view-tile', 'menu-view-flip-x', 'menu-view-flip-y'];
+    const button = document.getElementById(ids[index]);
+    if (!button) return;
+    button.classList.toggle('active', !!state[key]);
+    button.setAttribute('aria-pressed', String(!!state[key]));
+  });
+
+  setFgColor(state.fgColor);
+  setBgColor(state.bgColor);
+  setTool(state.tool);
+  setBrushSize(state.brushSize);
+
+  const transformButton = document.getElementById('btn-lasso-transform');
+  if (transformButton) {
+    transformButton.classList.toggle('hidden', !state.lassoActive ||
+      (state.tool !== 'lasso' && state.tool !== 'magicwand'));
+    transformButton.classList.toggle('active', !!state.lassoTransformMode);
+  }
+
+  if (typeof syncDOMVideos === 'function') syncDOMVideos();
+  renderLayerPanel();
+  renderTimeline();
+  compositeAll();
+  applyTransform();
+  if (state.lassoActive) drawLassoSelectionOutline();
+}
+
+function restoreDocument(doc) {
+  if (!doc || !doc.runtime) return;
+  canvasW = doc.canvasW;
+  canvasH = doc.canvasH;
+  layers = doc.layers;
+  layerIdCount = doc.layerIdCount;
+  activeLayerIdx = doc.activeLayerIdx;
+  DOCUMENT_STATE_KEYS.forEach(key => {
+    state[key] = doc.runtime[key];
+  });
+  state.isPlaying = false;
+  state.isDrawing = false;
+  state.isPanning = false;
+  state.isMovingAllBitmaps = false;
+  window.currentProjectHandle = doc.projectHandle || null;
+  window.currentProjectName = doc.projectName || null;
+  document.title = `Illustra (${doc.name})`;
+  syncDocumentUi();
+}
+
+function switchDocument(documentId) {
+  if (documentId === activeDocumentId) return;
+  const target = openDocuments.find(doc => doc.id === documentId);
+  if (!target) return;
+  if (state.isPlaying && typeof pause === 'function') pause();
+  captureActiveDocument();
+  activeDocumentId = documentId;
+  restoreDocument(target);
+  renderDocumentTabs();
+}
+
+function closeDocument(documentId) {
+  const index = openDocuments.findIndex(doc => doc.id === documentId);
+  if (index < 0) return;
+  if (openDocuments.length === 1) {
+    showToast('⚠️ At least one document must remain open');
+    return;
+  }
+  const doc = openDocuments[index];
+  if (!window.confirm(`Close "${doc.name}"? Unsaved changes will be discarded.`)) return;
+
+  const wasActive = documentId === activeDocumentId;
+  if (typeof window.disposeVideoElement === 'function') {
+    doc.layers.filter(layer => layer.isVideo).forEach(layer => {
+      window.disposeVideoElement(layer.video);
+    });
+  }
+  openDocuments.splice(index, 1);
+  if (wasActive) {
+    const next = openDocuments[Math.min(index, openDocuments.length - 1)];
+    activeDocumentId = next.id;
+    restoreDocument(next);
+  }
+  renderDocumentTabs();
+}
+
+function renderDocumentTabs() {
+  const tabs = document.getElementById('document-tabs');
+  if (!tabs) return;
+  tabs.replaceChildren();
+
+  openDocuments.forEach(doc => {
+    const tab = document.createElement('div');
+    tab.className = 'document-tab' + (doc.id === activeDocumentId ? ' active' : '');
+    tab.dataset.documentId = String(doc.id);
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-selected', String(doc.id === activeDocumentId));
+    tab.tabIndex = doc.id === activeDocumentId ? 0 : -1;
+    tab.title = doc.name;
+
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    icon.setAttribute('viewBox', '0 0 24 24');
+    icon.setAttribute('fill', 'none');
+    icon.setAttribute('stroke', 'currentColor');
+    icon.setAttribute('stroke-width', '2');
+    icon.classList.add('document-tab-icon');
+    icon.innerHTML = '<rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M3 16l5-5 4 4 3-3 6 6"></path>';
+
+    const name = document.createElement('span');
+    name.className = 'document-tab-name';
+    name.textContent = doc.name;
+
+    const close = document.createElement('button');
+    close.className = 'document-tab-close';
+    close.type = 'button';
+    close.title = `Close ${doc.name}`;
+    close.setAttribute('aria-label', `Close ${doc.name}`);
+    close.textContent = '×';
+    close.addEventListener('click', event => {
+      event.stopPropagation();
+      closeDocument(doc.id);
+    });
+
+    tab.append(icon, name, close);
+    tab.addEventListener('click', () => switchDocument(doc.id));
+    tab.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        switchDocument(doc.id);
+      }
+    });
+    tabs.appendChild(tab);
+  });
+
+  const activeTab = tabs.querySelector('.document-tab.active');
+  if (activeTab) activeTab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+function registerInitialDocument() {
+  if (openDocuments.length > 0) return;
+  const name = `Untitled ${untitledDocumentCounter++}`;
+  const doc = {
+    id: documentIdCounter++, name, kind: 'project', projectHandle: null,
+    projectName: null, imageHandle: null, imageName: null, imageType: null,
+    runtime: null, layers: []
+  };
+  openDocuments.push(doc);
+  activeDocumentId = doc.id;
+  window.currentProjectHandle = null;
+  window.currentProjectName = null;
+  captureActiveDocument();
+  document.title = `Illustra (${name})`;
+  renderDocumentTabs();
+}
+
+function createBlankDocument(w, h, bgColor) {
+  const name = `Untitled ${untitledDocumentCounter++}`;
+  beginDocumentSession(name, null, null, 'project');
+  state.bgMode = 'white';
+  initCanvas(w, h, bgColor);
+  setBgColor(bgColor);
+  finishCurrentDocument(name, null, null);
+}
+
+function openImageAsDocument(file, imageHandle = null) {
+  if (!isImageFile(file)) return Promise.resolve(false);
+  return new Promise(resolve => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const width = img.naturalWidth || img.width;
+      const height = img.naturalHeight || img.height;
+      const baseName = file.name.replace(/\.[^.]+$/, '') || 'Image';
+      const doc = beginDocumentSession(file.name, null, baseName, 'image');
+      doc.imageHandle = imageHandle;
+      doc.imageName = file.name;
+      doc.imageType = file.type || null;
+      state.bgMode = 'trans-bright';
+      initCanvas(width, height, '#ffffff');
+      state.bgMode = 'trans-bright';
+
+      const layer = layers[0];
+      layer.name = baseName.substring(0, 40);
+      const frame = layer.frames[0];
+      frame.canvas = document.createElement('canvas');
+      frame.canvas.width = width;
+      frame.canvas.height = height;
+      frame.ctx = frame.canvas.getContext('2d');
+      frame.ctx.drawImage(img, 0, 0);
+      frame.isKeyframe = true;
+      syncBackingCanvas(frame);
+
+      state.history = [];
+      state.redoStack = [];
+      saveHistory();
+      centerCanvas();
+      finishCurrentDocument(file.name, null, baseName);
+      syncDocumentUi();
+      URL.revokeObjectURL(objectUrl);
+      showToast(`🖼️ ${file.name} opened in a new tab`);
+      resolve(true);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      showToast(`⚠️ Could not open ${file.name}`);
+      resolve(false);
+    };
+    img.src = objectUrl;
+  });
+}
+
+window.beginDocumentLoad = (name, handle = null) =>
+  beginDocumentSession(name || 'Project', handle, name || null, 'project');
+window.finishDocumentLoad = (name, handle = window.currentProjectHandle) =>
+  finishCurrentDocument(name || 'Project', handle, name || null);
+window.updateCurrentDocumentTab = (name, handle = window.currentProjectHandle) =>
+  finishCurrentDocument(name || getActiveDocument()?.name, handle, name || null);
+window.openImageAsDocument = openImageAsDocument;
+
 function centerCanvas() {
   const area = container.getBoundingClientRect();
   const fitScale = Math.min(
@@ -1469,6 +1824,7 @@ function applyTransform() {
   previewCanvas.style.transform = t;
   selectionOverlay.style.transform = t;
   tileCanvas.style.transform = 'none';
+  if (state.lassoActive && state.lassoTransformMode) drawLassoSelectionOutline();
   updateTileCanvas();
   
   // Real-time sync of video layers during pan/zoom
@@ -1501,6 +1857,68 @@ function clientToCanvas(clientX, clientY) {
   }
   
   return { x, y };
+}
+
+// Selection geometry always lives on the canvas pixel grid, independently of
+// the brush anti-aliasing setting. Integer coordinates represent pixel edges;
+// a rectangle from (10, 10) to (11, 11), for example, selects exactly one
+// pixel. This keeps the visible marquee and the extracted pixel mask aligned.
+function snapSelectionPoint(x, y) {
+  return {
+    x: Math.round(x),
+    y: Math.round(y)
+  };
+}
+
+// Rasterize one or more closed paths into a truly binary, pixel-addressed
+// mask. Testing scanlines through pixel centers avoids the ambiguous
+// anti-aliased edge coverage produced by CanvasRenderingContext2D.fill().
+// Combining all intersections on a row also preserves the even-odd rule used
+// by selections with holes.
+function rasterizeSelectionPaths(paths) {
+  const mask = new Uint8Array(canvasW * canvasH);
+  const edgesByRow = Array.from({ length: canvasH }, () => []);
+
+  (paths || []).forEach(path => {
+    if (!path || path.length < 3) return;
+
+    const edgeCount = path.length;
+    for (let i = 0; i < edgeCount; i++) {
+      const a = path[i];
+      const b = path[(i + 1) % edgeCount];
+      if (!a || !b || a.y === b.y) continue;
+
+      const top = a.y < b.y ? a : b;
+      const bottom = a.y < b.y ? b : a;
+      const firstRow = Math.max(0, Math.ceil(top.y - 0.5));
+      const lastRowExclusive = Math.min(canvasH, Math.ceil(bottom.y - 0.5));
+
+      for (let y = firstRow; y < lastRowExclusive; y++) {
+        const scanY = y + 0.5;
+        const t = (scanY - top.y) / (bottom.y - top.y);
+        edgesByRow[y].push(top.x + (bottom.x - top.x) * t);
+      }
+    }
+  });
+
+  for (let y = 0; y < canvasH; y++) {
+    const intersections = edgesByRow[y];
+    if (intersections.length < 2) continue;
+    intersections.sort((a, b) => a - b);
+
+    for (let i = 0; i + 1 < intersections.length; i += 2) {
+      const left = intersections[i];
+      const right = intersections[i + 1];
+      const firstX = Math.max(0, Math.ceil(left - 0.5));
+      const lastXExclusive = Math.min(canvasW, Math.ceil(right - 0.5));
+      const rowOffset = y * canvasW;
+      for (let x = firstX; x < lastXExclusive; x++) {
+        mask[rowOffset + x] = 1;
+      }
+    }
+  }
+
+  return mask;
 }
 
 // ─── History (Undo/Redo) ─────────────────────────────────────────
@@ -1932,48 +2350,50 @@ function bakeFloatingSelectionOnly() {
       });
     });
     
-    // Recalculate bounding box
+    // Rebuild the stencil from the transformed paths using the same binary
+    // pixel-center rule as a newly drawn selection.
+    const transformedMask = rasterizeSelectionPaths(state.lassoPaths);
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    state.lassoPaths.forEach(path => {
-      path.forEach(p => {
-        if (p.x < minX) minX = p.x;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.y > maxY) maxY = p.y;
-      });
-    });
-    minX = Math.floor(Math.max(0, minX));
-    maxX = Math.ceil(Math.min(canvasW, maxX));
-    minY = Math.floor(Math.max(0, minY));
-    maxY = Math.ceil(Math.min(canvasH, maxY));
-    state.lassoBoundingBox = { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
-    
-    // Regenerate lassoMaskCanvas
-    const w = state.lassoBoundingBox.w;
-    const h = state.lassoBoundingBox.h;
-    const maskCanvas = document.createElement('canvas');
-    maskCanvas.width = w || 1; maskCanvas.height = h || 1;
-    const maskCtx = maskCanvas.getContext('2d');
-    maskCtx.fillStyle = 'white';
-    maskCtx.beginPath();
-    state.lassoPaths.forEach(path => {
-      if (!path || path.length < 2) return;
-      maskCtx.moveTo(path[0].x - state.lassoBoundingBox.x, path[0].y - state.lassoBoundingBox.y);
-      for (let i = 1; i < path.length; i++) {
-        maskCtx.lineTo(path[i].x - state.lassoBoundingBox.x, path[i].y - state.lassoBoundingBox.y);
+    for (let y = 0; y < canvasH; y++) {
+      for (let x = 0; x < canvasW; x++) {
+        if (transformedMask[x + y * canvasW] !== 1) continue;
+        if (x < minX) minX = x;
+        if (x + 1 > maxX) maxX = x + 1;
+        if (y < minY) minY = y;
+        if (y + 1 > maxY) maxY = y + 1;
       }
-      maskCtx.closePath();
-    });
-    maskCtx.fill("evenodd");
-    
-    state.lassoPaths.forEach(path => {
-      if (!path) return;
-      for (let i = 0; i < path.length; i++) {
-        maskCtx.fillRect(path[i].x - state.lassoBoundingBox.x, path[i].y - state.lassoBoundingBox.y, 1, 1);
+    }
+
+    if (Number.isFinite(minX) && Number.isFinite(minY)) {
+      const w = maxX - minX;
+      const h = maxY - minY;
+      state.lassoBoundingBox = { x: minX, y: minY, w, h };
+
+      const maskCanvas = document.createElement('canvas');
+      maskCanvas.width = w; maskCanvas.height = h;
+      const maskCtx = maskCanvas.getContext('2d');
+      const imageData = maskCtx.createImageData(w, h);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (transformedMask[(x + minX) + (y + minY) * canvasW] !== 1) continue;
+          const idx = (x + y * w) * 4;
+          imageData.data[idx] = 255;
+          imageData.data[idx + 1] = 255;
+          imageData.data[idx + 2] = 255;
+          imageData.data[idx + 3] = 255;
+        }
       }
-    });
-    
-    state.lassoMaskCanvas = maskCanvas;
+      maskCtx.putImageData(imageData, 0, 0);
+      state.lassoMaskCanvas = maskCanvas;
+      state.selectionMask = transformedMask;
+    } else {
+      state.lassoActive = false;
+      state.lassoPath = [];
+      state.lassoPaths = [];
+      state.lassoBoundingBox = null;
+      state.lassoMaskCanvas = null;
+      state.selectionMask = null;
+    }
   }
   
   state.lassoSelectionCanvas = null;
@@ -1985,7 +2405,7 @@ function bakeFloatingSelectionOnly() {
   state.lassoCutPending     = false;
   
   // Re-generate the Uint8Array mask to keep everything fully synced
-  updateSelectionMask();
+  if (state.lassoMaskCanvas) updateSelectionMask();
   
   const btn = document.getElementById('btn-lasso-transform');
   if (btn) {
@@ -2611,6 +3031,68 @@ function getSelectionSvgTransform(ox, oy) {
   return `translate(${cx} ${cy}) rotate(${degrees}) scale(${state.lassoScaleX || 1} ${state.lassoScaleY || 1}) translate(${-cx} ${-cy})`;
 }
 
+function getLassoTransformHandles() {
+  if (!state.lassoBoundingBox) return null;
+  const box = state.lassoBoundingBox;
+  const cx = box.x + state.lassoCurrentOffset.x + box.w / 2;
+  const cy = box.y + state.lassoCurrentOffset.y + box.h / 2;
+  const cos = Math.cos(state.lassoRotation || 0);
+  const sin = Math.sin(state.lassoRotation || 0);
+  const scaleX = state.lassoScaleX || 1;
+  const scaleY = state.lassoScaleY || 1;
+  const point = (x, y) => ({
+    x: cx + x * scaleX * cos - y * scaleY * sin,
+    y: cy + x * scaleX * sin + y * scaleY * cos
+  });
+  const halfW = box.w / 2;
+  const halfH = box.h / 2;
+  const corners = [
+    point(-halfW, -halfH), point(halfW, -halfH),
+    point(-halfW, halfH), point(halfW, halfH)
+  ];
+  const top = point(0, -halfH);
+  const rotation = { x: top.x + sin * 20 / state.zoom, y: top.y - cos * 20 / state.zoom };
+  return { corners, top, rotation };
+}
+
+function renderLassoTransformHandles() {
+  const handles = getLassoTransformHandles();
+  if (!handles) return;
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const group = document.createElementNS(svgNS, 'g');
+  const [topLeft, topRight, bottomLeft, bottomRight] = handles.corners;
+  const border = document.createElementNS(svgNS, 'path');
+  border.setAttribute('d', `M ${topLeft.x} ${topLeft.y} L ${topRight.x} ${topRight.y} L ${bottomRight.x} ${bottomRight.y} L ${bottomLeft.x} ${bottomLeft.y} Z`);
+  border.setAttribute('fill', 'none');
+  border.setAttribute('stroke', '#ffffff');
+  border.setAttribute('stroke-width', '1');
+  border.setAttribute('vector-effect', 'non-scaling-stroke');
+  group.appendChild(border);
+
+  const stem = document.createElementNS(svgNS, 'path');
+  stem.setAttribute('d', `M ${handles.top.x} ${handles.top.y} L ${handles.rotation.x} ${handles.rotation.y}`);
+  stem.setAttribute('fill', 'none');
+  stem.setAttribute('stroke', '#ffffff');
+  stem.setAttribute('stroke-width', '1');
+  stem.setAttribute('vector-effect', 'non-scaling-stroke');
+  group.appendChild(stem);
+
+  const size = 8 / state.zoom;
+  [...handles.corners, handles.rotation].forEach(point => {
+    const square = document.createElementNS(svgNS, 'rect');
+    square.setAttribute('x', point.x - size / 2);
+    square.setAttribute('y', point.y - size / 2);
+    square.setAttribute('width', size);
+    square.setAttribute('height', size);
+    square.setAttribute('fill', '#ffffff');
+    square.setAttribute('stroke', '#000000');
+    square.setAttribute('stroke-width', '1');
+    square.setAttribute('vector-effect', 'non-scaling-stroke');
+    group.appendChild(square);
+  });
+  selectionOverlay.appendChild(group);
+}
+
 function drawLassoPreview() {
   previewCanvas.style.mixBlendMode = 'difference';
   pctx.clearRect(0, 0, canvasW, canvasH);
@@ -2644,93 +3126,22 @@ function drawLassoSelectionOutline() {
       paths.push(state.lassoPath);
     }
   }
-  if (paths.length === 0) return;
+  if (paths.length === 0) {
+    selectionOverlay.replaceChildren();
+    return;
+  }
   const ox = state.lassoCurrentOffset.x;
   const oy = state.lassoCurrentOffset.y;
-  
-  pctx.save();
-  pctx.filter = 'none';
-  pctx.imageSmoothingEnabled = false;
-  
-  const cx = state.lassoBoundingBox ? (state.lassoBoundingBox.x + ox + state.lassoBoundingBox.w / 2) : 0;
-  const cy = state.lassoBoundingBox ? (state.lassoBoundingBox.y + oy + state.lassoBoundingBox.h / 2) : 0;
-  
-  if (state.lassoBoundingBox) {
-    pctx.translate(cx, cy);
-    pctx.rotate(state.lassoRotation || 0);
-    pctx.scale(state.lassoScaleX || 1, state.lassoScaleY || 1);
-    pctx.translate(-cx, -cy);
-  }
 
-  // The selection outline lives in a vector overlay so its stroke and dash
-  // remain a fixed screen size instead of becoming artwork pixels on zoom.
+  // Keep the outline and transform controls in the SVG overlay so they can
+  // extend beyond the artwork canvas while staying fixed-size on screen.
   renderSelectionOverlay([{
     paths,
     ox,
     oy,
     transform: getSelectionSvgTransform(ox, oy)
   }]);
-
-  // Bounding box with handles for Transform Mode
-  if (state.lassoTransformMode && state.lassoBoundingBox) {
-    const bw = state.lassoBoundingBox.w;
-    const bh = state.lassoBoundingBox.h;
-    const bx = state.lassoBoundingBox.x + ox;
-    const by = state.lassoBoundingBox.y + oy;
-
-    // Draw 1px border around the bounding box using fillRect
-    pctx.fillStyle = '#ffffff';
-    pctx.fillRect(bx, by, bw, 1);
-    pctx.fillRect(bx, by + bh - 1, bw, 1);
-    pctx.fillRect(bx, by, 1, bh);
-    pctx.fillRect(bx + bw - 1, by, 1, bh);
-
-    const rhs = Math.max(3, Math.round(8 / state.zoom));
-    const rhhs = Math.floor(rhs / 2);
-    
-    const corners = [
-      [bx, by],
-      [bx + bw, by],
-      [bx, by + bh],
-      [bx + bw, by + bh]
-    ];
-    
-    corners.forEach(([cx, cy]) => {
-      // Draw handle fill
-      pctx.fillStyle = '#ffffff';
-      pctx.fillRect(cx - rhhs, cy - rhhs, rhs, rhs);
-      // Draw handle border
-      pctx.fillStyle = '#000000';
-      pctx.fillRect(cx - rhhs, cy - rhhs, rhs, 1);
-      pctx.fillRect(cx - rhhs, cy + rhs - rhhs - 1, rhs, 1);
-      pctx.fillRect(cx - rhhs, cy - rhhs, 1, rhs);
-      pctx.fillRect(cx + rhs - rhhs - 1, cy - rhhs, 1, rhs);
-    });
-    
-    // Add a rotation hint line at the top
-    const rx = bx + bw/2;
-    const ry = by - 20/state.zoom;
-    
-    pctx.fillStyle = '#ffffff';
-    const lineY0 = Math.min(by, ry);
-    const lineY1 = Math.max(by, ry);
-    pctx.fillRect(rx, lineY0, 1, lineY1 - lineY0);
-    
-    // Draw rotation handle circle/dot as a filled square
-    const rrad = Math.max(2, Math.round(4 / state.zoom));
-    const rsize = rrad * 2;
-    pctx.fillStyle = '#ffffff';
-    pctx.fillRect(rx - rrad, ry - rrad, rsize, rsize);
-    
-    // Draw handle border
-    pctx.fillStyle = '#000000';
-    pctx.fillRect(rx - rrad, ry - rrad, rsize, 1);
-    pctx.fillRect(rx - rrad, ry + rsize - rrad - 1, rsize, 1);
-    pctx.fillRect(rx - rrad, ry - rrad, 1, rsize);
-    pctx.fillRect(rx + rsize - rrad - 1, ry - rrad, 1, rsize);
-  }
-
-  pctx.restore();
+  if (state.lassoTransformMode) renderLassoTransformHandles();
 }
 
 function extractLassoSelection(providedMask = null, forceKeepFloating = false, extractPixels = true) {
@@ -2739,36 +3150,29 @@ function extractLassoSelection(providedMask = null, forceKeepFloating = false, e
 
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   const paths = state.lassoPaths && state.lassoPaths.length > 0 ? state.lassoPaths : (state.lassoPath && state.lassoPath.length > 2 ? [state.lassoPath] : []);
-  if (providedMask) {
-    for (let y = 0; y < canvasH; y++) {
-      for (let x = 0; x < canvasW; x++) {
-        if (providedMask[x + y * canvasW] === 1) {
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
-        }
+  // Existing stencil selections (magic wand, invert, expand/contract) already
+  // have an authoritative binary mask. Reuse it instead of rasterizing their
+  // display-only contour paths a second time.
+  const pixelMask = providedMask || state.selectionMask || rasterizeSelectionPaths(paths);
+  for (let y = 0; y < canvasH; y++) {
+    for (let x = 0; x < canvasW; x++) {
+      if (pixelMask[x + y * canvasW] === 1) {
+        if (x < minX) minX = x;
+        if (x + 1 > maxX) maxX = x + 1;
+        if (y < minY) minY = y;
+        if (y + 1 > maxY) maxY = y + 1;
       }
     }
-  } else {
-    paths.forEach(path => {
-      path.forEach(p => {
-        if (p.x < minX) minX = p.x;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.y > maxY) maxY = p.y;
-      });
-    });
   }
 
-  minX = Math.floor(Math.max(0, minX));
-  maxX = Math.ceil(Math.min(canvasW, maxX));
-  minY = Math.floor(Math.max(0, minY));
-  maxY = Math.ceil(Math.min(canvasH, maxY));
+  minX = Math.max(0, minX);
+  maxX = Math.min(canvasW, maxX);
+  minY = Math.max(0, minY);
+  maxY = Math.min(canvasH, maxY);
   const w = maxX - minX;
   const h = maxY - minY;
   
-  if (w < 4 || h < 4) {
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w < 1 || h < 1) {
     state.lassoActive = false;
     state.lassoPath = [];
     state.lassoPaths = [];
@@ -2797,46 +3201,24 @@ function extractLassoSelection(providedMask = null, forceKeepFloating = false, e
   maskCanvas.width = w || 1; maskCanvas.height = h || 1;
   const maskCtx = maskCanvas.getContext('2d');
   
-  if (providedMask) {
-    const tempImageData = maskCtx.createImageData(w || 1, h || 1);
-    const tempData = tempImageData.data;
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const val = providedMask[(x + minX) + (y + minY) * canvasW] === 1 ? 255 : 0;
-        const idx = (x + y * w) * 4;
-        tempData[idx] = val;
-        tempData[idx+1] = val;
-        tempData[idx+2] = val;
-        tempData[idx+3] = val;
-      }
+  const tempImageData = maskCtx.createImageData(w || 1, h || 1);
+  const tempData = tempImageData.data;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const val = pixelMask[(x + minX) + (y + minY) * canvasW] === 1 ? 255 : 0;
+      const idx = (x + y * w) * 4;
+      tempData[idx] = val;
+      tempData[idx+1] = val;
+      tempData[idx+2] = val;
+      tempData[idx+3] = val;
     }
-    maskCtx.putImageData(tempImageData, 0, 0);
-  } else {
-    maskCtx.fillStyle = 'white';
-    maskCtx.beginPath();
-    paths.forEach(path => {
-      if (!path || path.length < 2) return;
-      maskCtx.moveTo((path[0].x || 0) - minX, (path[0].y || 0) - minY);
-      for (let i = 1; i < path.length; i++) {
-        maskCtx.lineTo((path[i].x || 0) - minX, (path[i].y || 0) - minY);
-      }
-      maskCtx.closePath();
-    });
-    maskCtx.fill("evenodd");
-
-    // Fill the boundary pixels to prevent shrinkage
-    paths.forEach(path => {
-      if (!path) return;
-      for (let i = 0; i < path.length; i++) {
-        maskCtx.fillRect((path[i].x || 0) - minX, (path[i].y || 0) - minY, 1, 1);
-      }
-    });
   }
+  maskCtx.putImageData(tempImageData, 0, 0);
 
   const maskData = maskCtx.getImageData(0, 0, w, h).data;
 
   state.lassoMaskCanvas = maskCanvas;
-  updateSelectionMask(providedMask);
+  updateSelectionMask(pixelMask);
 
   // A newly-created selection is only a stencil. Keeping pixels in their
   // original layer makes selection itself completely non-destructive and
@@ -2990,6 +3372,200 @@ function traceMaskContours(mask) {
   return paths;
 }
 
+// Convert a binary pixel mask into paths that run on the OUTER edges of the
+// selected pixels. Unlike traceMaskContours(), these paths do not pass through
+// pixel centers, so the transform marquee can hug opaque artwork exactly.
+function tracePixelMaskEdges(mask, width, height, offsetX = 0, offsetY = 0) {
+  const edges = [];
+  const edgesByStart = new Map();
+
+  const addEdge = (x1, y1, x2, y2, direction) => {
+    const edge = { x1, y1, x2, y2, direction, visited: false };
+    edges.push(edge);
+    const key = `${x1},${y1}`;
+    if (!edgesByStart.has(key)) edgesByStart.set(key, []);
+    edgesByStart.get(key).push(edge);
+  };
+  const isSelected = (x, y) =>
+    x >= 0 && x < width && y >= 0 && y < height && mask[x + y * width] === 1;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (!isSelected(x, y)) continue;
+      if (!isSelected(x, y - 1)) addEdge(x, y, x + 1, y, 0);
+      if (!isSelected(x + 1, y)) addEdge(x + 1, y, x + 1, y + 1, 1);
+      if (!isSelected(x, y + 1)) addEdge(x + 1, y + 1, x, y + 1, 2);
+      if (!isSelected(x - 1, y)) addEdge(x, y + 1, x, y, 3);
+    }
+  }
+
+  const paths = [];
+  for (const firstEdge of edges) {
+    if (firstEdge.visited) continue;
+
+    const rawPath = [{ x: firstEdge.x1, y: firstEdge.y1 }];
+    let edge = firstEdge;
+    while (edge && !edge.visited) {
+      edge.visited = true;
+      rawPath.push({ x: edge.x2, y: edge.y2 });
+      if (edge.x2 === firstEdge.x1 && edge.y2 === firstEdge.y1) break;
+
+      const candidates = (edgesByStart.get(`${edge.x2},${edge.y2}`) || [])
+        .filter(candidate => !candidate.visited);
+      // At a diagonal pixel contact there can be two possible continuations.
+      // Keeping the selected pixels on the right separates the two contours.
+      const turnPriority = [1, 0, 3, 2]; // right, straight, left, back
+      const incomingDirection = rawPathDirection(rawPath);
+      edge = null;
+      for (const turn of turnPriority) {
+        edge = candidates.find(candidate =>
+          (candidate.direction - incomingDirection + 4) % 4 === turn
+        );
+        if (edge) break;
+      }
+    }
+
+    if (rawPath.length < 4) continue;
+
+    // Remove intermediate collinear vertices without changing pixel accuracy.
+    const closed = rawPath[0].x === rawPath[rawPath.length - 1].x &&
+      rawPath[0].y === rawPath[rawPath.length - 1].y;
+    if (!closed) continue;
+    const vertices = rawPath.slice(0, -1);
+    const simplified = vertices.filter((point, index) => {
+      const previous = vertices[(index - 1 + vertices.length) % vertices.length];
+      const next = vertices[(index + 1) % vertices.length];
+      return (point.x - previous.x) * (next.y - point.y) !==
+        (point.y - previous.y) * (next.x - point.x);
+    });
+    if (simplified.length < 3) continue;
+    const path = simplified.map(point => ({
+      x: point.x + offsetX,
+      y: point.y + offsetY
+    }));
+    path.push({ ...path[0] });
+    paths.push(path);
+  }
+
+  return paths;
+}
+
+function rawPathDirection(path) {
+  if (path.length < 2) return 0;
+  const a = path[path.length - 2];
+  const b = path[path.length - 1];
+  if (b.x > a.x) return 0;
+  if (b.y > a.y) return 1;
+  if (b.x < a.x) return 2;
+  return 3;
+}
+
+// Before Transform starts, replace the geometric selection with the exact set
+// of selected pixels whose alpha is non-zero. This also trims the floating
+// bitmap and its transform box, while preserving its current canvas position.
+function refineSelectionToOpaquePixels() {
+  if (!state.lassoActive || !state.lassoBoundingBox) return false;
+
+  if (state.lassoSelectionCanvas) {
+    const sourceCanvas = state.lassoSelectionCanvas;
+    const sourceCtx = sourceCanvas.getContext('2d');
+    const sourceData = sourceCtx.getImageData(0, 0, sourceCanvas.width, sourceCanvas.height);
+    const sourcePixels = sourceData.data;
+    let minX = sourceCanvas.width, minY = sourceCanvas.height, maxX = -1, maxY = -1;
+
+    for (let y = 0; y < sourceCanvas.height; y++) {
+      for (let x = 0; x < sourceCanvas.width; x++) {
+        if (sourcePixels[(x + y * sourceCanvas.width) * 4 + 3] === 0) continue;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+    if (maxX < minX || maxY < minY) return false;
+
+    const width = maxX - minX + 1;
+    const height = maxY - minY + 1;
+    const croppedCanvas = document.createElement('canvas');
+    croppedCanvas.width = width;
+    croppedCanvas.height = height;
+    croppedCanvas.getContext('2d').putImageData(
+      sourceCtx.getImageData(minX, minY, width, height), 0, 0
+    );
+
+    const opaqueMask = new Uint8Array(width * height);
+    const croppedPixels = croppedCanvas.getContext('2d').getImageData(0, 0, width, height).data;
+    for (let i = 0; i < opaqueMask.length; i++) {
+      opaqueMask[i] = croppedPixels[i * 4 + 3] > 0 ? 1 : 0;
+    }
+
+    const bboxX = state.lassoBoundingBox.x + (state.lassoCurrentOffset.x || 0) + minX;
+    const bboxY = state.lassoBoundingBox.y + (state.lassoCurrentOffset.y || 0) + minY;
+    const paths = tracePixelMaskEdges(opaqueMask, width, height, bboxX, bboxY);
+    if (paths.length === 0) return false;
+
+    const maskCanvas = document.createElement('canvas');
+    maskCanvas.width = width;
+    maskCanvas.height = height;
+    const maskCtx = maskCanvas.getContext('2d');
+    const maskData = maskCtx.createImageData(width, height);
+    for (let i = 0; i < opaqueMask.length; i++) {
+      if (opaqueMask[i] !== 1) continue;
+      const index = i * 4;
+      maskData.data[index] = 255;
+      maskData.data[index + 1] = 255;
+      maskData.data[index + 2] = 255;
+      maskData.data[index + 3] = 255;
+    }
+    maskCtx.putImageData(maskData, 0, 0);
+
+    const canvasMask = new Uint8Array(canvasW * canvasH);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (opaqueMask[x + y * width] !== 1) continue;
+        const canvasX = bboxX + x;
+        const canvasY = bboxY + y;
+        if (canvasX >= 0 && canvasX < canvasW && canvasY >= 0 && canvasY < canvasH) {
+          canvasMask[canvasX + canvasY * canvasW] = 1;
+        }
+      }
+    }
+
+    state.lassoSelectionCanvas = croppedCanvas;
+    state.lassoMaskCanvas = maskCanvas;
+    state.lassoBoundingBox = { x: bboxX, y: bboxY, w: width, h: height };
+    state.lassoPaths = paths;
+    state.lassoPath = paths[0];
+    state.selectionMask = canvasMask;
+    state.lassoCurrentOffset = { x: 0, y: 0 };
+    state.lassoPrevOffset = { x: 0, y: 0 };
+    state.lassoStartOffset = { x: 0, y: 0 };
+    return true;
+  }
+
+  const lctx = getLCtx();
+  if (!lctx) return false;
+  const selectedMask = getExistingSelectionMask();
+  const layerPixels = lctx.getImageData(0, 0, canvasW, canvasH).data;
+  const opaqueMask = new Uint8Array(canvasW * canvasH);
+  let hasOpaquePixel = false;
+  for (let i = 0; i < opaqueMask.length; i++) {
+    if (selectedMask[i] === 1 && layerPixels[i * 4 + 3] > 0) {
+      opaqueMask[i] = 1;
+      hasOpaquePixel = true;
+    }
+  }
+  if (!hasOpaquePixel) return false;
+
+  const paths = tracePixelMaskEdges(opaqueMask, canvasW, canvasH);
+  if (paths.length === 0) return false;
+  state.lassoPaths = paths;
+  state.lassoPath = paths[0];
+  state.selectionMask = opaqueMask;
+  extractLassoSelection(opaqueMask, true, true);
+  return !!state.lassoSelectionCanvas;
+}
+
 function getCombinedLayersImageData() {
   const tempCanvas = document.createElement('canvas');
   tempCanvas.width = canvasW || 1;
@@ -3068,24 +3644,32 @@ function magicWandSelect(sx, sy, isShift, isAlt) {
            Math.abs(data[idx+3] - ta) <= tolerance;
   }
 
-  const stack = [[startPixelX, startPixelY]];
   const visited = new Uint8Array(canvasW * canvasH);
-  visited[startPixelX + startPixelY * canvasW] = 1;
+  if (state.wandSelectSimilar) {
+    for (let y = 0; y < canvasH; y++) {
+      for (let x = 0; x < canvasW; x++) {
+        if (match(x, y)) visited[x + y * canvasW] = 1;
+      }
+    }
+  } else {
+    const stack = [[startPixelX, startPixelY]];
+    visited[startPixelX + startPixelY * canvasW] = 1;
 
-  while (stack.length > 0) {
-    const [cx, cy] = stack.pop();
-    const neighbors = [
-      [cx + 1, cy],
-      [cx - 1, cy],
-      [cx, cy + 1],
-      [cx, cy - 1]
-    ];
-    for (const [nx, ny] of neighbors) {
-      if (nx >= 0 && nx < canvasW && ny >= 0 && ny < canvasH) {
-        const key = nx + ny * canvasW;
-        if (!visited[key] && match(nx, ny)) {
-          visited[key] = 1;
-          stack.push([nx, ny]);
+    while (stack.length > 0) {
+      const [cx, cy] = stack.pop();
+      const neighbors = [
+        [cx + 1, cy],
+        [cx - 1, cy],
+        [cx, cy + 1],
+        [cx, cy - 1]
+      ];
+      for (const [nx, ny] of neighbors) {
+        if (nx >= 0 && nx < canvasW && ny >= 0 && ny < canvasH) {
+          const key = nx + ny * canvasW;
+          if (!visited[key] && match(nx, ny)) {
+            visited[key] = 1;
+            stack.push([nx, ny]);
+          }
         }
       }
     }
@@ -3107,8 +3691,10 @@ function magicWandSelect(sx, sy, isShift, isAlt) {
     }
   }
 
-  // Trace all contours
-  const newPaths = traceMaskContours(combinedMask);
+  // Pixel edges also represent isolated matches in a global selection.
+  const newPaths = state.wandSelectSimilar
+    ? tracePixelMaskEdges(combinedMask, canvasW, canvasH)
+    : traceMaskContours(combinedMask);
 
   if (newPaths.length > 0) {
     state.lassoPaths = newPaths;
@@ -3139,20 +3725,7 @@ function lassoPathSelect(closedPath, isShift, isAlt) {
     bakeLassoSelection(false);
   }
 
-  // Build new mask from the drawn polygon (same fill approach as original extractLassoSelection)
-  const newMaskCanvas = document.createElement('canvas');
-  newMaskCanvas.width = canvasW; newMaskCanvas.height = canvasH;
-  const nmctx = newMaskCanvas.getContext('2d');
-  nmctx.fillStyle = 'white';
-  nmctx.beginPath();
-  nmctx.moveTo(closedPath[0].x, closedPath[0].y);
-  for (let i = 1; i < closedPath.length; i++) nmctx.lineTo(closedPath[i].x, closedPath[i].y);
-  nmctx.closePath();
-  nmctx.fill();
-  for (let i = 0; i < closedPath.length; i++) nmctx.fillRect(closedPath[i].x, closedPath[i].y, 1, 1);
-  const newMaskData = nmctx.getImageData(0, 0, canvasW, canvasH).data;
-  const newMask = new Uint8Array(canvasW * canvasH);
-  for (let i = 0; i < newMask.length; i++) newMask[i] = newMaskData[i * 4 + 3] > 128 ? 1 : 0;
+  const newMask = rasterizeSelectionPaths([closedPath]);
 
   // Combine masks exactly like magicWandSelect
   const combinedMask = new Uint8Array(canvasW * canvasH);
@@ -3170,6 +3743,7 @@ function lassoPathSelect(closedPath, isShift, isAlt) {
     state.lassoPath = newPaths[0];
     state.lassoActive = true;
     extractLassoSelection(combinedMask);
+    refineSelectionToOpaquePixels();
     drawLassoSelectionOutline();
     compositeAll();
     saveHistory();
@@ -3471,6 +4045,110 @@ function hexToRgb(hex) {
   return [parseInt(hex.slice(1,3),16), parseInt(hex.slice(3,5),16), parseInt(hex.slice(5,7),16)];
 }
 
+function bridgeBucketGaps(barriers, width, height, gapTolerance) {
+  // Thin the outline to one pixel so the two tips of a broken stroke can be
+  // found even when the brush made the original line several pixels wide.
+  const skeleton = new Uint8Array(barriers);
+  const candidates = [];
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const i = x + y * width;
+      if (skeleton[i]) candidates.push(i);
+    }
+  }
+
+  for (let iteration = 0; iteration < Math.max(4, Math.ceil(gapTolerance / 2)); iteration++) {
+    let removed = 0;
+    for (let pass = 0; pass < 2; pass++) {
+      const erase = [];
+      for (const i of candidates) {
+        if (!skeleton[i]) continue;
+        const n = skeleton[i - width], ne = skeleton[i - width + 1];
+        const e = skeleton[i + 1], se = skeleton[i + width + 1];
+        const s = skeleton[i + width], sw = skeleton[i + width - 1];
+        const w = skeleton[i - 1], nw = skeleton[i - width - 1];
+        const neighbors = n + ne + e + se + s + sw + w + nw;
+        if (neighbors < 2 || neighbors > 6) continue;
+        const transitions = (!n && ne) + (!ne && e) + (!e && se) + (!se && s)
+          + (!s && sw) + (!sw && w) + (!w && nw) + (!nw && n);
+        if (transitions !== 1) continue;
+        if (pass === 0 ? (n && e && s) || (e && s && w)
+          : (n && e && w) || (n && s && w)) continue;
+        erase.push(i);
+      }
+      for (const i of erase) skeleton[i] = 0;
+      removed += erase.length;
+    }
+    if (removed === 0) break;
+  }
+
+  const tips = [];
+  for (const i of candidates) {
+    if (!skeleton[i]) continue;
+    let count = 0, neighbor = -1;
+    for (const offset of [-width, -width + 1, 1, width + 1,
+      width, width - 1, -1, -width - 1]) {
+      if (skeleton[i + offset]) { count++; neighbor = i + offset; }
+    }
+    if (count !== 1) continue;
+    const x = i % width, y = Math.floor(i / width);
+    tips.push({ x, y, dx: x - neighbor % width, dy: y - Math.floor(neighbor / width) });
+  }
+
+  const pairs = [];
+  // The skeleton tip can sit a pixel or two inside the visible stroke end.
+  const maxDistance = gapTolerance + 2;
+  const maxDistanceSq = maxDistance * maxDistance;
+  const tipBuckets = new Map();
+  for (let i = 0; i < tips.length; i++) {
+    const key = `${Math.floor(tips[i].x / maxDistance)},${Math.floor(tips[i].y / maxDistance)}`;
+    if (!tipBuckets.has(key)) tipBuckets.set(key, []);
+    tipBuckets.get(key).push(i);
+  }
+  for (let a = 0; a < tips.length; a++) {
+    const bucketX = Math.floor(tips[a].x / maxDistance);
+    const bucketY = Math.floor(tips[a].y / maxDistance);
+    for (let by = bucketY - 1; by <= bucketY + 1; by++) {
+      for (let bx = bucketX - 1; bx <= bucketX + 1; bx++) {
+        for (const b of tipBuckets.get(`${bx},${by}`) || []) {
+          if (b <= a) continue;
+          const dx = tips[b].x - tips[a].x;
+          const dy = tips[b].y - tips[a].y;
+          const distanceSq = dx * dx + dy * dy;
+          if (distanceSq === 0 || distanceSq > maxDistanceSq) continue;
+          if (dx * tips[a].dx + dy * tips[a].dy <= 0 ||
+              -dx * tips[b].dx - dy * tips[b].dy <= 0) continue;
+          pairs.push({ a, b, distanceSq });
+        }
+      }
+    }
+  }
+  pairs.sort((a, b) => a.distanceSq - b.distanceSq);
+
+  const used = new Uint8Array(tips.length);
+  const bridged = new Uint8Array(barriers);
+  let bridgeCount = 0;
+  for (const pair of pairs) {
+    if (used[pair.a] || used[pair.b]) continue;
+    used[pair.a] = used[pair.b] = 1;
+    bridgeCount++;
+    let x = tips[pair.a].x, y = tips[pair.a].y;
+    const endX = tips[pair.b].x, endY = tips[pair.b].y;
+    const stepX = x < endX ? 1 : -1;
+    const stepY = y < endY ? 1 : -1;
+    const dx = Math.abs(endX - x), dy = Math.abs(endY - y);
+    let error = dx - dy;
+    while (true) {
+      bridged[x + y * width] = 1;
+      if (x === endX && y === endY) break;
+      const twiceError = 2 * error;
+      if (twiceError > -dy) { error -= dy; x += stepX; }
+      if (twiceError < dx) { error += dx; y += stepY; }
+    }
+  }
+  return bridgeCount ? bridged : null;
+}
+
 function floodFill(sx, sy, fillColorHex) {
   const lctx = getLCtx(); if (!lctx) return;
   markActiveFrameAsKeyframe();
@@ -3484,7 +4162,10 @@ function floodFill(sx, sy, fillColorHex) {
   const [fr, fg, fb] = hexToRgb(fillColorHex);
   const fa = Math.round(state.opacity * 255);
 
-  const px = (Math.floor(sx) + Math.floor(sy) * canvasW) * 4;
+  const startX = Math.floor(sx), startY = Math.floor(sy);
+  if (startX < 0 || startX >= canvasW || startY < 0 || startY >= canvasH) return;
+  const start = startX + startY * canvasW;
+  const px = start * 4;
   const tr = matchData[px], tg = matchData[px+1], tb = matchData[px+2], ta = matchData[px+3];
 
   if (layerData[px]===fr && layerData[px+1]===fg && layerData[px+2]===fb && layerData[px+3]===fa && !state.allLayersActive) return;
@@ -3497,26 +4178,57 @@ function floodFill(sx, sy, fillColorHex) {
            Math.abs(matchData[idx+3]-ta) <= tolerance;
   }
 
-  const stack = [[Math.floor(sx), Math.floor(sy)]];
-  const visited = new Uint8Array(canvasW * canvasH);
-
-  while (stack.length) {
-    const [x, y] = stack.pop();
-    if (x<0||x>=canvasW||y<0||y>=canvasH) continue;
-    if (visited[x+y*canvasW]) continue;
-    if (state.lassoActive) {
-      if (!state.selectionMask || state.selectionMask[x + y * canvasW] !== 1) {
-        continue;
-      }
+  function collectRegion(blocked, stopAtEdge) {
+    const visited = new Uint8Array(canvasW * canvasH);
+    const queue = new Int32Array(visited.length);
+    if (!match(px) || (blocked && blocked[start]) ||
+        (state.lassoActive && (!state.selectionMask || state.selectionMask[start] !== 1))) {
+      return { queue, count: 0, touchesEdge: false };
     }
-    const idx = (x + y*canvasW)*4;
-    if (!match(idx)) continue;
-    visited[x+y*canvasW] = 1;
+    let head = 0, count = 1;
+    queue[0] = start;
+    visited[start] = 1;
+
+    function enqueue(i) {
+      if (visited[i] || (blocked && blocked[i]) || !match(i * 4) ||
+          (state.lassoActive && (!state.selectionMask || state.selectionMask[i] !== 1))) return;
+      visited[i] = 1;
+      queue[count++] = i;
+    }
+
+    while (head < count) {
+      const i = queue[head++];
+      const x = i % canvasW;
+      const y = Math.floor(i / canvasW);
+      if (stopAtEdge && (x === 0 || x === canvasW - 1 || y === 0 || y === canvasH - 1)) {
+        return { queue, count, touchesEdge: true };
+      }
+      if (x > 0) enqueue(i - 1);
+      if (x < canvasW - 1) enqueue(i + 1);
+      if (y > 0) enqueue(i - canvasW);
+      if (y < canvasH - 1) enqueue(i + canvasW);
+    }
+    return { queue, count, touchesEdge: false };
+  }
+
+  // A closed region can use the original pixels exactly. Only create virtual
+  // gap barriers when the unprotected fill can reach the canvas exterior.
+  let region = collectRegion(null, state.bucketGapTolerance > 0 && !state.lassoActive);
+  if (state.bucketGapTolerance > 0 && !state.lassoActive && region.touchesEdge) {
+    const barriers = new Uint8Array(canvasW * canvasH);
+    for (let i = 0; i < barriers.length; i++) {
+      barriers[i] = match(i * 4) ? 0 : 1;
+    }
+    const gapBarriers = bridgeBucketGaps(barriers, canvasW, canvasH, state.bucketGapTolerance);
+    region = collectRegion(gapBarriers, false);
+  }
+
+  for (let i = 0; i < region.count; i++) {
+    const idx = region.queue[i] * 4;
     layerData[idx]   = fr;
     layerData[idx+1] = fg;
     layerData[idx+2] = fb;
     layerData[idx+3] = fa;
-    stack.push([x+1,y],[x-1,y],[x,y+1],[x,y-1]);
   }
 
   lctx.putImageData(layerImageData, 0, 0);
@@ -3611,7 +4323,8 @@ container.addEventListener('pointerdown', e => {
   state.clickStartTime = Date.now();
 
   // Click outside canvas handling (discard selection if left click outside white page)
-  if (state.lassoActive && (x < 0 || x >= canvasW || y < 0 || y >= canvasH)) {
+  if (state.lassoActive && !state.lassoTransformMode &&
+      (x < 0 || x >= canvasW || y < 0 || y >= canvasH)) {
     if (!state.spaceDown && e.button === 0) {
       discardLassoSelection(); // bakes floating pixels back first
       compositeAll();
@@ -3633,6 +4346,7 @@ container.addEventListener('pointerdown', e => {
   // ── Lasso and Magic Wand tool handling ───────────────────────────
   if (state.tool === 'lasso' || state.tool === 'magicwand') {
     if (state.lassoTransformMode && state.lassoActive && state.lassoBoundingBox) {
+      const handles = getLassoTransformHandles();
       const cx = state.lassoBoundingBox.x + state.lassoCurrentOffset.x + state.lassoBoundingBox.w / 2;
       const cy = state.lassoBoundingBox.y + state.lassoCurrentOffset.y + state.lassoBoundingBox.h / 2;
       const dx = x - cx;
@@ -3652,23 +4366,20 @@ container.addEventListener('pointerdown', e => {
       const halfW = state.lassoBoundingBox.w / 2;
       const halfH = state.lassoBoundingBox.h / 2;
       
-      const rotY = -halfH - 20 / state.zoom;
-      const distToRot = Math.sqrt(Math.pow(localX, 2) + Math.pow(localY - rotY, 2));
-      
+      const distToRot = Math.hypot(x - handles.rotation.x, y - handles.rotation.y);
       const scaleCorners = [
         { x: -halfW, y: -halfH, signX: -1, signY: -1 },
         { x:  halfW, y: -halfH, signX:  1, signY: -1 },
         { x: -halfW, y:  halfH, signX: -1, signY:  1 },
         { x:  halfW, y:  halfH, signX:  1, signY:  1 }
       ];
-      const cornerDistances = scaleCorners.map(corner =>
-        Math.hypot(localX - corner.x, localY - corner.y)
+      const cornerDistances = handles.corners.map(corner =>
+        Math.hypot(x - corner.x, y - corner.y)
       );
       const scaleCornerIndex = cornerDistances.indexOf(Math.min(...cornerDistances));
       const minDistToScale = cornerDistances[scaleCornerIndex];
 
-      // We use average scale for hit tolerance to keep it roughly the same size visually
-      const hitTolerance = 12 / (state.zoom * ((sX + sY) / 2));
+      const hitTolerance = 12 / state.zoom;
 
       if (distToRot <= hitTolerance) {
          state.isDrawing = true;
@@ -3723,6 +4434,7 @@ container.addEventListener('pointerdown', e => {
          container.setPointerCapture(e.pointerId);
          return;
       }
+      if (x < 0 || x >= canvasW || y < 0 || y >= canvasH) return;
     }
 
     if (e.ctrlKey) {
@@ -3753,9 +4465,10 @@ container.addEventListener('pointerdown', e => {
         state.isDrawing = true;
         state.lassoDragged = false;
         state.lassoDragAction = null;
-        state.lassoStartX = x;
-        state.lassoStartY = y;
-        state.lassoPath = [{ x, y }];
+        const snapped = snapSelectionPoint(x, y);
+        state.lassoStartX = snapped.x;
+        state.lassoStartY = snapped.y;
+        state.lassoPath = [snapped];
         if (!state.lassoShiftKey && !state.lassoAltKey) {
           state.lassoActive = false;
         }
@@ -3969,18 +4682,22 @@ container.addEventListener('pointermove', e => {
       compositeAll();
       drawLassoSelectionOutline();
     } else if (state.tool === 'lasso') {
+      const snapped = snapSelectionPoint(x, y);
       if (state.lassoType === 'rect') {
         const x0 = state.lassoStartX;
         const y0 = state.lassoStartY;
         state.lassoPath = [
           { x: x0, y: y0 },
-          { x: x, y: y0 },
-          { x: x, y: y },
-          { x: x0, y: y },
+          { x: snapped.x, y: y0 },
+          { x: snapped.x, y: snapped.y },
+          { x: x0, y: snapped.y },
           { x: x0, y: y0 }
         ];
       } else {
-        state.lassoPath.push({ x, y });
+        const last = state.lassoPath[state.lassoPath.length - 1];
+        if (!last || last.x !== snapped.x || last.y !== snapped.y) {
+          state.lassoPath.push(snapped);
+        }
       }
       drawLassoPreview();
     }
@@ -4091,6 +4808,7 @@ container.addEventListener('pointerup', e => {
           state.lassoPaths = [state.lassoPath];
           state.lassoActive = true;
           extractLassoSelection();
+          refineSelectionToOpaquePixels();
           drawLassoSelectionOutline();
           saveHistory();
         }
@@ -4148,6 +4866,7 @@ container.addEventListener('pointerleave', e => {
         state.lassoPaths = [state.lassoPath];
         state.lassoActive = true;
         extractLassoSelection();
+        refineSelectionToOpaquePixels();
         drawLassoSelectionOutline();
         saveHistory();
       } else if (!state.lassoDragged) {
@@ -4220,6 +4939,7 @@ function selectAllSelection() {
   state.lassoPaths = [state.lassoPath];
   state.lassoActive = true;
   extractLassoSelection();
+  refineSelectionToOpaquePixels();
   drawLassoSelectionOutline();
   saveHistory();
 }
@@ -4456,8 +5176,13 @@ document.addEventListener('keydown', e => {
   // New canvas
   if ((e.ctrlKey || e.metaKey) && e.key === 'n') { e.preventDefault(); showNewCanvasModal(); }
 
-  // Save / Open project
-  if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveProject(); }
+  // Save image / Save Image As / Save Project
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+    e.preventDefault();
+    if (e.altKey) saveProject();
+    else if (e.shiftKey) saveImageAs();
+    else saveImage();
+  }
   if ((e.ctrlKey || e.metaKey) && e.key === 'o') { e.preventDefault(); openProject(); }
 
 
@@ -4528,6 +5253,66 @@ window.addEventListener('blur', () => {
 });
 
 // ─── Global Paste Event (External Images) ────────────────────────
+function pasteExternalImage(img) {
+  if (state.tool !== 'lasso' && state.tool !== 'magicwand') setTool('lasso');
+  if (state.lassoActive) bakeLassoSelection();
+
+  // Keep the image's source pixels intact, even when it is larger than the canvas.
+  getLCtx();
+  const width = img.naturalWidth || img.width;
+  const height = img.naturalHeight || img.height;
+  const copy = document.createElement('canvas');
+  copy.width = width;
+  copy.height = height;
+  copy.getContext('2d').drawImage(img, 0, 0);
+
+  const cx = Math.floor((canvasW - width) / 2);
+  const cy = Math.floor((canvasH - height) / 2);
+  state.lassoPath = [
+    { x: cx, y: cy },
+    { x: cx + width, y: cy },
+    { x: cx + width, y: cy + height },
+    { x: cx, y: cy + height },
+    { x: cx, y: cy }
+  ];
+  state.lassoPaths = [state.lassoPath];
+  state.lassoBoundingBox = { x: cx, y: cy, w: width, h: height };
+  state.lassoSelectionCanvas = copy;
+
+  const maskCanvas = document.createElement('canvas');
+  maskCanvas.width = width;
+  maskCanvas.height = height;
+  const mc = maskCanvas.getContext('2d');
+  mc.fillStyle = 'white';
+  mc.fillRect(0, 0, width, height);
+  state.lassoMaskCanvas = maskCanvas;
+
+  state.lassoActive = true;
+  state.lassoCurrentOffset = { x: 0, y: 0 };
+  state.lassoPrevOffset = { x: 0, y: 0 };
+  state.lassoStartOffset = { x: 0, y: 0 };
+  state.lassoDragged = false;
+  state.lassoRotation = 0;
+  state.lassoScaleX = 1;
+  state.lassoScaleY = 1;
+  state.lassoBaseScale = 1;
+  state.lassoBaseScaleX = 1;
+  state.lassoBaseScaleY = 1;
+  state.lassoBaseRotation = 0;
+  state.lassoTransformMode = false;
+
+  updateSelectionMask();
+  const transformBtn = document.getElementById('btn-lasso-transform');
+  if (transformBtn) {
+    transformBtn.classList.remove('hidden');
+    transformBtn.classList.remove('active');
+  }
+
+  compositeAll();
+  drawLassoSelectionOutline();
+  saveHistory();
+}
+
 document.addEventListener('paste', (e) => {
   if (!e.clipboardData || !e.clipboardData.items) return;
   for (const item of e.clipboardData.items) {
@@ -4537,66 +5322,7 @@ document.addEventListener('paste', (e) => {
       
       const img = new Image();
       img.onload = () => {
-        if (state.tool !== 'lasso' && state.tool !== 'magicwand') setTool('lasso');
-        if (state.lassoActive) bakeLassoSelection();
-
-        // Ensure active layer frame canvas exists
-        getLCtx();
-
-        const copy = document.createElement('canvas');
-        copy.width = img.width;
-        copy.height = img.height;
-        copy.getContext('2d').drawImage(img, 0, 0);
-
-        // Center on screen
-        const cx = Math.floor(canvasW / 2 - img.width / 2);
-        const cy = Math.floor(canvasH / 2 - img.height / 2);
-
-        state.lassoPath = [
-          {x: cx, y: cy},
-          {x: cx + img.width, y: cy},
-          {x: cx + img.width, y: cy + img.height},
-          {x: cx, y: cy + img.height},
-          {x: cx, y: cy}
-        ];
-        state.lassoPaths = [state.lassoPath];
-        state.lassoBoundingBox = { x: cx, y: cy, w: img.width, h: img.height };
-        state.lassoSelectionCanvas = copy;
-
-        // Reconstruct rectangular mask canvas
-        const maskCanvas = document.createElement('canvas');
-        maskCanvas.width = img.width;
-        maskCanvas.height = img.height;
-        const mc = maskCanvas.getContext('2d');
-        mc.fillStyle = 'white';
-        mc.fillRect(0, 0, img.width, img.height);
-        state.lassoMaskCanvas = maskCanvas;
-
-        state.lassoActive = true;
-        state.lassoCurrentOffset = { x: 0, y: 0 };
-        state.lassoPrevOffset = { x: 0, y: 0 };
-        state.lassoStartOffset = { x: 0, y: 0 };
-        state.lassoDragged = false;
-        state.lassoRotation = 0;
-        state.lassoScaleX = 1;
-        state.lassoScaleY = 1;
-        state.lassoBaseScale = 1;
-        state.lassoBaseScaleX = 1;
-        state.lassoBaseScaleY = 1;
-        state.lassoBaseRotation = 0;
-        state.lassoTransformMode = false;
-        
-        updateSelectionMask();
-
-        const transformBtn = document.getElementById('btn-lasso-transform');
-        if (transformBtn) {
-          transformBtn.classList.remove('hidden');
-          transformBtn.classList.remove('active');
-        }
-
-        compositeAll();
-        drawLassoSelectionOutline();
-        saveHistory(); // Save so Ctrl+Z can undo the paste
+        pasteExternalImage(img);
       };
       
       const reader = new FileReader();
@@ -4618,6 +5344,24 @@ function isImageFile(file) {
 
 function isVideoFile(file) {
   return !!file && (file.type.startsWith('video/') || VIDEO_FILE_EXTENSIONS.test(file.name));
+}
+
+function pasteImageFile(file) {
+  return new Promise((resolve) => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      pasteExternalImage(img);
+      URL.revokeObjectURL(objectUrl);
+      resolve(true);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      showToast(`⚠️ Could not paste ${file.name}`);
+      resolve(false);
+    };
+    img.src = objectUrl;
+  });
 }
 
 function importImageFile(file) {
@@ -4674,6 +5418,50 @@ function importImageFile(file) {
 window.importImageFile = importImageFile;
 
 const imageFileInput = document.getElementById('image-input');
+const imageOpenInput = document.getElementById('image-open-input');
+document.getElementById('menu-open-images').addEventListener('click', async () => {
+  document.getElementById('menu-arquivo-dropdown').classList.remove('show');
+
+  if (window.showOpenFilePicker) {
+    try {
+      const handles = await window.showOpenFilePicker({
+        multiple: true,
+        types: [{
+          description: 'Image files',
+          accept: {
+            'image/png': ['.png'],
+            'image/jpeg': ['.jpg', '.jpeg'],
+            'image/webp': ['.webp'],
+            'image/gif': ['.gif'],
+            'image/bmp': ['.bmp'],
+            'image/avif': ['.avif'],
+            'image/svg+xml': ['.svg']
+          }
+        }]
+      });
+      for (const handle of handles) {
+        const file = await handle.getFile();
+        await openImageAsDocument(file, handle);
+      }
+      return;
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+      console.warn('Native image picker failed, using file input fallback:', err);
+    }
+  }
+
+  imageOpenInput.value = '';
+  imageOpenInput.click();
+});
+
+imageOpenInput.addEventListener('change', async () => {
+  const files = Array.from(imageOpenInput.files || []);
+  imageOpenInput.value = '';
+  for (const file of files) {
+    await openImageAsDocument(file);
+  }
+});
+
 document.getElementById('menu-import-image').addEventListener('click', () => {
   document.getElementById('menu-arquivo-dropdown').classList.remove('show');
   imageFileInput.value = '';
@@ -4727,7 +5515,7 @@ container.addEventListener('drop', async (event) => {
 
   for (const file of supportedFiles) {
     if (isImageFile(file)) {
-      await importImageFile(file);
+      await pasteImageFile(file);
     } else if (typeof window.importVideoFile === 'function') {
       await window.importVideoFile(file);
     }
@@ -4814,6 +5602,8 @@ function setTool(tool) {
   const sizeOpts = document.getElementById('size-option-container');
   const opacityOpts = document.getElementById('opacity-option-container');
   const thresholdOpts = document.getElementById('threshold-option-container');
+  const bucketGapOpts = document.getElementById('bucket-gap-option-container');
+  const wandSimilarOpts = document.getElementById('wand-similar-option-container');
   const lassoOpts = document.getElementById('lasso-options-container');
   const hardnessOpts = document.getElementById('hardness-option-container');
   const spacingOpts = document.getElementById('spacing-option-container');
@@ -4823,6 +5613,8 @@ function setTool(tool) {
   if (sizeOpts) sizeOpts.style.display = 'none';
   if (opacityOpts) opacityOpts.style.display = 'none';
   if (thresholdOpts) thresholdOpts.style.display = 'none';
+  if (bucketGapOpts) bucketGapOpts.style.display = 'none';
+  if (wandSimilarOpts) wandSimilarOpts.style.display = 'none';
   if (lassoOpts) lassoOpts.style.display = 'none';
   if (hardnessOpts) hardnessOpts.style.display = 'none';
   if (spacingOpts) spacingOpts.style.display = 'none';
@@ -4833,9 +5625,11 @@ function setTool(tool) {
     if (lassoOpts) lassoOpts.style.display = 'flex';
   } else if (tool === 'magicwand') {
     if (thresholdOpts) thresholdOpts.style.display = 'flex';
+    if (wandSimilarOpts) wandSimilarOpts.style.display = 'flex';
   } else if (tool === 'fill') {
     if (opacityOpts) opacityOpts.style.display = 'flex';
     if (thresholdOpts) thresholdOpts.style.display = 'flex';
+    if (bucketGapOpts) bucketGapOpts.style.display = 'flex';
   } else if (['pencil', 'brush', 'eraser', 'line', 'rect', 'circle', 'curve'].includes(tool)) {
     if (sizeOpts) sizeOpts.style.display = 'flex';
     if (opacityOpts) opacityOpts.style.display = 'flex';
@@ -4988,7 +5782,10 @@ if (blurStrengthSlider && blurStrengthVal) {
 // ─── Bucket Threshold ─────────────────────────────────────────────
 const bucketThresholdSlider = document.getElementById('bucket-threshold');
 const bucketThresholdVal    = document.getElementById('bucket-threshold-val');
+const bucketGapSlider       = document.getElementById('bucket-gap-tolerance');
+const bucketGapVal          = document.getElementById('bucket-gap-tolerance-val');
 const allLayersToggle       = document.getElementById('all-layers-toggle');
+const wandSelectSimilarToggle = document.getElementById('wand-select-similar');
 
 if (bucketThresholdSlider && bucketThresholdVal) {
   bucketThresholdSlider.addEventListener('input', () => {
@@ -4999,9 +5796,25 @@ if (bucketThresholdSlider && bucketThresholdVal) {
   bucketThresholdSlider.addEventListener('change',    () => bucketThresholdSlider.blur());
 }
 
+if (bucketGapSlider && bucketGapVal) {
+  bucketGapSlider.addEventListener('input', () => {
+    state.bucketGapTolerance = parseInt(bucketGapSlider.value, 10);
+    bucketGapVal.textContent = `${state.bucketGapTolerance}px`;
+  });
+  bucketGapSlider.addEventListener('pointerup', () => bucketGapSlider.blur());
+  bucketGapSlider.addEventListener('change', () => bucketGapSlider.blur());
+}
+
 if (allLayersToggle) {
   allLayersToggle.addEventListener('change', () => {
     state.allLayersActive = allLayersToggle.checked;
+  });
+}
+
+if (wandSelectSimilarToggle) {
+  wandSelectSimilarToggle.addEventListener('change', () => {
+    state.wandSelectSimilar = wandSelectSimilarToggle.checked;
+    wandSelectSimilarToggle.blur();
   });
 }
 
@@ -5118,13 +5931,7 @@ document.getElementById('modal-create').addEventListener('click', () => {
   const w  = parseInt(document.getElementById('new-width').value) || 1280;
   const h  = parseInt(document.getElementById('new-height').value) || 720;
   const bg = document.getElementById('new-bg').value;
-  state.history = [];
-  state.redoStack = [];
-  window.currentProjectHandle = null; // new project — next save must ask for location
-  window.currentProjectName = null;
-  document.title = 'Illustra — Illustration Software';
-  initCanvas(w, h, bg);
-  setBgColor(bg);
+  createBlankDocument(w, h, bg);
   document.getElementById('modal-overlay').classList.add('hidden');
 });
 
@@ -5488,26 +6295,165 @@ function showToast(message) {
 
 
 
-// ─── Save Image As ────────────────────────────────────────────────
-document.getElementById('menu-save-image').addEventListener('click', () => {
-  menuArquivo.classList.remove('show');
-  state.isExporting = true;
-  compositeAll();
-  mainCanvas.toBlob(async (blob) => {
-    state.isExporting = false;
-    compositeAll();
-    if (!blob) return;
-    const defaultName = 'canvas_frame.png';
-    const saved = await saveFileWithPicker(blob, defaultName, 'image/png');
-    if (!saved) {
-      // Fallback
-      const link = document.createElement('a');
-      link.download = defaultName;
-      link.href = URL.createObjectURL(blob);
-      link.click();
+// ─── Image Save / Save As ─────────────────────────────────────────
+const WRITABLE_IMAGE_TYPES = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp'
+};
+
+function getWritableImageType(fileName, preferredType = null) {
+  const extension = String(fileName || '').match(/\.([^.]+)$/)?.[1]?.toLowerCase();
+  if (extension && WRITABLE_IMAGE_TYPES[extension]) return WRITABLE_IMAGE_TYPES[extension];
+  return Object.values(WRITABLE_IMAGE_TYPES).includes(preferredType) ? preferredType : null;
+}
+
+function getSuggestedImageName() {
+  const doc = getActiveDocument();
+  const currentName = doc?.imageName || doc?.name || 'canvas_frame.png';
+  if (getWritableImageType(currentName)) return currentName;
+  const baseName = currentName.replace(/\.[^.]+$/, '') || 'canvas_frame';
+  return `${baseName}.png`;
+}
+
+function renderCurrentImageBlob(type) {
+  return new Promise((resolve, reject) => {
+    const wasExporting = state.isExporting;
+    const restoreCanvas = () => {
+      state.isExporting = wasExporting;
+      compositeAll();
+    };
+
+    try {
+      state.isExporting = true;
+      compositeAll();
+      mainCanvas.toBlob(blob => {
+        restoreCanvas();
+        if (blob) resolve(blob);
+        else reject(new Error(`Could not encode image as ${type}`));
+      }, type, 0.95);
+    } catch (err) {
+      restoreCanvas();
+      reject(err);
     }
-  }, 'image/png');
-});
+  });
+}
+
+async function ensureImageWritePermission(handle) {
+  try {
+    if (typeof handle.queryPermission !== 'function') return true;
+    let permission = await handle.queryPermission({ mode: 'readwrite' });
+    if (permission === 'granted') return true;
+    if (typeof handle.requestPermission !== 'function') return false;
+    permission = await handle.requestPermission({ mode: 'readwrite' });
+    return permission === 'granted';
+  } catch (err) {
+    console.warn('Could not get image write permission:', err);
+    return false;
+  }
+}
+
+function rememberImageDestination(handle, name, type) {
+  const doc = getActiveDocument();
+  if (!doc) return;
+  doc.kind = 'image';
+  doc.imageHandle = handle || null;
+  doc.imageName = name;
+  doc.imageType = type;
+  doc.name = name;
+  captureActiveDocument();
+  document.title = `Illustra (${name})`;
+  renderDocumentTabs();
+}
+
+function downloadImageBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.download = fileName;
+  link.href = url;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function saveImage() {
+  menuArquivo.classList.remove('show');
+  const doc = getActiveDocument();
+  const handle = doc?.imageHandle;
+  const type = getWritableImageType(handle?.name || doc?.imageName, doc?.imageType);
+
+  // Images opened through the native picker retain a writable handle. New
+  // canvases and formats Canvas cannot encode safely start with Save As.
+  if (!handle || !type) {
+    await saveImageAs();
+    return;
+  }
+
+  if (!await ensureImageWritePermission(handle)) {
+    await saveImageAs();
+    return;
+  }
+
+  try {
+    const blob = await renderCurrentImageBlob(type);
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    rememberImageDestination(handle, handle.name, type);
+    showToast('💾 Image saved!');
+  } catch (err) {
+    console.warn('Direct image save failed, opening Save As:', err);
+    showToast('⚠️ Could not overwrite the original image');
+    await saveImageAs();
+  }
+}
+
+async function saveImageAs() {
+  menuArquivo.classList.remove('show');
+  const suggestedName = getSuggestedImageName();
+
+  if (window.showSaveFilePicker) {
+    try {
+      // Open the picker before rendering so keyboard-triggered saves keep the
+      // browser's user activation required by the File System Access API.
+      const handle = await window.showSaveFilePicker({
+        suggestedName,
+        types: [
+          { description: 'PNG Image', accept: { 'image/png': ['.png'] } },
+          { description: 'JPEG Image', accept: { 'image/jpeg': ['.jpg', '.jpeg'] } },
+          { description: 'WebP Image', accept: { 'image/webp': ['.webp'] } }
+        ]
+      });
+      const type = getWritableImageType(handle.name) || 'image/png';
+      const blob = await renderCurrentImageBlob(type);
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      rememberImageDestination(handle, handle.name, type);
+      showToast('💾 Image saved!');
+      return;
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+      console.warn('Save Image As picker failed, using download fallback:', err);
+    }
+  }
+
+  try {
+    const type = getWritableImageType(suggestedName) || 'image/png';
+    const blob = await renderCurrentImageBlob(type);
+    downloadImageBlob(blob, suggestedName);
+    rememberImageDestination(null, suggestedName, type);
+    showToast('💾 Image downloaded!');
+  } catch (err) {
+    console.error('Image save failed:', err);
+    showToast('❌ Could not save image');
+  }
+}
+
+document.getElementById('menu-save').addEventListener('click', saveImage);
+document.getElementById('menu-save-image').addEventListener('click', saveImageAs);
+window.saveImage = saveImage;
+window.saveImageAs = saveImageAs;
 
 
 
@@ -5963,6 +6909,71 @@ document.getElementById('menu-auto-adjust').addEventListener('click', () => {
 });
 
 // ─── Color Adjustments Modal ──────────────────────────────────────
+// PNN quantization (already bundled for GIF export) builds a palette from the
+// image's actual colors. Alpha stays untouched so soft edges remain intact.
+function reduceCanvasColors(canvas, maxColors) {
+  if (!maxColors) return;
+  const ctx = canvas.getContext('2d');
+  const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const pixels = image.data;
+  const pixelCount = canvas.width * canvas.height;
+  const stride = Math.max(1, Math.ceil(pixelCount / 50000));
+  const samples = new Uint8Array(Math.ceil(pixelCount / stride) * 4);
+  let sampleCount = 0;
+  let visibleCount = 0;
+  for (let pixel = 0; pixel < pixelCount; pixel++) {
+    const offset = pixel * 4;
+    if (!pixels[offset + 3]) continue;
+    if (visibleCount++ % stride) continue;
+    const target = sampleCount++ * 4;
+    samples[target] = pixels[offset];
+    samples[target + 1] = pixels[offset + 1];
+    samples[target + 2] = pixels[offset + 2];
+    samples[target + 3] = 255;
+  }
+  if (!sampleCount) return;
+
+  const { quantize, applyPalette } = window.exports;
+  const palette = quantize(samples.subarray(0, sampleCount * 4), maxColors, { format: 'rgb565' });
+  const indices = applyPalette(pixels, palette, 'rgb565');
+  for (let pixel = 0; pixel < pixelCount; pixel++) {
+    const offset = pixel * 4;
+    if (!pixels[offset + 3]) continue;
+    const color = palette[indices[pixel]];
+    pixels[offset] = color[0];
+    pixels[offset + 1] = color[1];
+    pixels[offset + 2] = color[2];
+  }
+  ctx.putImageData(image, 0, 0);
+}
+
+function renderColorAdjustment(sourceCanvas, settings) {
+  if (settings.previewCache?.has(sourceCanvas)) return settings.previewCache.get(sourceCanvas);
+  const result = document.createElement('canvas');
+  result.width = sourceCanvas.width;
+  result.height = sourceCanvas.height;
+  const ctx = result.getContext('2d');
+  ctx.filter = settings.filterString;
+  ctx.drawImage(sourceCanvas, 0, 0);
+  ctx.filter = 'none';
+
+  if (settings.mosaic > 1) {
+    const tiny = document.createElement('canvas');
+    tiny.width = Math.max(1, Math.floor(result.width / settings.mosaic));
+    tiny.height = Math.max(1, Math.floor(result.height / settings.mosaic));
+    const tinyCtx = tiny.getContext('2d');
+    tinyCtx.imageSmoothingEnabled = false;
+    tinyCtx.drawImage(result, 0, 0, tiny.width, tiny.height);
+    ctx.clearRect(0, 0, result.width, result.height);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(tiny, 0, 0, result.width, result.height);
+  }
+
+  reduceCanvasColors(result, settings.colorCount);
+  settings.previewCache?.set(sourceCanvas, result);
+  return result;
+}
+
 const colorAdjustModal = document.getElementById('color-adjust-modal');
 const menuColorAdjust = document.getElementById('menu-color-adjust');
 
@@ -6047,6 +7058,8 @@ if (menuColorAdjust && colorAdjustModal) {
     const contrast = parseInt(document.getElementById('adjust-contrast').value);
     const depth = parseFloat(document.getElementById('adjust-depth').value);
     const posterize = parseInt(document.getElementById('adjust-posterize').value);
+    const colorStep = parseInt(document.getElementById('adjust-color-count').value);
+    const colorCount = colorStep ? 2 ** (9 - colorStep) : 0;
     const mosaic = parseInt(document.getElementById('adjust-mosaic').value);
     const invert = document.getElementById('adjust-invert').checked;
     const allLayers = document.getElementById('adjust-all-layers').checked;
@@ -6063,10 +7076,12 @@ if (menuColorAdjust && colorAdjustModal) {
       contrast,
       depth,
       posterize,
+      colorCount,
       mosaic,
       invert,
       allLayers,
-      filterString: getFilterString(hue, sat, bright, contrast, depth, invert)
+      filterString: getFilterString(hue, sat, bright, contrast, depth, invert),
+      previewCache: new WeakMap()
     };
 
     compositeAll();
@@ -6093,6 +7108,9 @@ if (menuColorAdjust && colorAdjustModal) {
     
     document.getElementById('adjust-posterize').value = 256;
     document.getElementById('adjust-posterize-val').textContent = '256';
+
+    document.getElementById('adjust-color-count').value = 0;
+    document.getElementById('adjust-color-count-val').textContent = 'Original';
 
     document.getElementById('adjust-mosaic').value = 1;
     document.getElementById('adjust-mosaic-val').textContent = '1px';
@@ -6124,6 +7142,12 @@ if (menuColorAdjust && colorAdjustModal) {
         applyPreview();
       });
     }
+  });
+
+  document.getElementById('adjust-color-count').addEventListener('input', (event) => {
+    const step = Number(event.target.value);
+    document.getElementById('adjust-color-count-val').textContent = step ? String(2 ** (9 - step)) : 'Original';
+    applyPreview();
   });
 
   document.getElementById('adjust-invert').addEventListener('change', applyPreview);
@@ -6216,37 +7240,15 @@ if (menuColorAdjust && colorAdjustModal) {
     const post = state.colorAdjustPreview.posterize;
     updateSVGFilter(lum, post);
 
-    const filterString = state.colorAdjustPreview.filterString;
-
     // Save history checkpoint before mutating pixels so it supports Undo/Redo
     saveHistory();
 
     // If selection is active, bake the adjustment directly into the floating selection canvas
     if (state.lassoActive && state.lassoSelectionCanvas) {
-      const tempCanvas = document.createElement('canvas');
-      tempCanvas.width = state.lassoSelectionCanvas.width;
-      tempCanvas.height = state.lassoSelectionCanvas.height;
+      const tempCanvas = renderColorAdjustment(state.lassoSelectionCanvas, state.colorAdjustPreview);
       const tempCtx = tempCanvas.getContext('2d');
-      
-      tempCtx.filter = filterString;
-      tempCtx.drawImage(state.lassoSelectionCanvas, 0, 0);
-      
-      const mosaic = state.colorAdjustPreview.mosaic || 1;
-      if (mosaic > 1) {
-        const tinyCanvas = document.createElement('canvas');
-        tinyCanvas.width = Math.max(1, Math.floor(tempCanvas.width / mosaic));
-        tinyCanvas.height = Math.max(1, Math.floor(tempCanvas.height / mosaic));
-        const tinyCtx = tinyCanvas.getContext('2d');
-        tinyCtx.imageSmoothingEnabled = false;
-        tinyCtx.drawImage(tempCanvas, 0, 0, tinyCanvas.width, tinyCanvas.height);
-        
-        tempCtx.clearRect(0, 0, tempCanvas.width, tempCanvas.height);
-        tempCtx.imageSmoothingEnabled = false;
-        tempCtx.drawImage(tinyCanvas, 0, 0, tempCanvas.width, tempCanvas.height);
-      }
 
       if (state.lassoMaskCanvas) {
-        tempCtx.filter = 'none';
         tempCtx.globalCompositeOperation = 'destination-in';
         tempCtx.drawImage(state.lassoMaskCanvas, 0, 0);
       }
@@ -6259,59 +7261,22 @@ if (menuColorAdjust && colorAdjustModal) {
       const isAllLayers = state.colorAdjustPreview.allLayers;
       const activeLayer = layers[activeLayerIdx];
       const targets = isAllLayers ? layers : (activeLayer ? [activeLayer] : []);
-      const mosaic = state.colorAdjustPreview.mosaic || 1;
 
       targets.forEach(l => {
         if (l.isVideo) return; // skip video layers
         l.frames.forEach(f => {
           if (f.isKeyframe && f.canvas) {
-            const tempCanvas = document.createElement('canvas');
-            tempCanvas.width = canvasW;
-            tempCanvas.height = canvasH;
-            const tempCtx = tempCanvas.getContext('2d');
-            
-            tempCtx.filter = filterString;
-            tempCtx.drawImage(f.canvas, 0, 0);
-
-            if (mosaic > 1) {
-              const tinyCanvas = document.createElement('canvas');
-              tinyCanvas.width = Math.max(1, Math.floor(canvasW / mosaic));
-              tinyCanvas.height = Math.max(1, Math.floor(canvasH / mosaic));
-              const tinyCtx = tinyCanvas.getContext('2d');
-              tinyCtx.imageSmoothingEnabled = false;
-              tinyCtx.drawImage(tempCanvas, 0, 0, tinyCanvas.width, tinyCanvas.height);
-              
-              tempCtx.clearRect(0, 0, canvasW, canvasH);
-              tempCtx.imageSmoothingEnabled = false;
-              tempCtx.drawImage(tinyCanvas, 0, 0, canvasW, canvasH);
-            }
+            const tempCanvas = renderColorAdjustment(f.canvas, state.colorAdjustPreview);
             
             f.ctx.clearRect(0, 0, canvasW, canvasH);
             f.ctx.drawImage(tempCanvas, 0, 0);
 
             if (f.backingCanvas) {
-              const bTemp = document.createElement('canvas');
-              bTemp.width = canvasW * 3;
-              bTemp.height = canvasH * 3;
-              const btctx = bTemp.getContext('2d');
-              btctx.filter = filterString;
-              btctx.drawImage(f.backingCanvas, 0, 0);
+              const bTemp = renderColorAdjustment(f.backingCanvas, state.colorAdjustPreview);
               
               const bctx = f.backingCanvas.getContext('2d');
               bctx.clearRect(0, 0, canvasW * 3, canvasH * 3);
-              if (mosaic > 1) {
-                const tinyCanvas = document.createElement('canvas');
-                tinyCanvas.width = Math.max(1, Math.floor(canvasW * 3 / mosaic));
-                tinyCanvas.height = Math.max(1, Math.floor(canvasH * 3 / mosaic));
-                const tinyCtx = tinyCanvas.getContext('2d');
-                tinyCtx.imageSmoothingEnabled = false;
-                tinyCtx.drawImage(bTemp, 0, 0, tinyCanvas.width, tinyCanvas.height);
-                
-                bctx.imageSmoothingEnabled = false;
-                bctx.drawImage(tinyCanvas, 0, 0, canvasW * 3, canvasH * 3);
-              } else {
-                bctx.drawImage(bTemp, 0, 0);
-              }
+              bctx.drawImage(bTemp, 0, 0);
             }
           }
         });
@@ -6393,6 +7358,7 @@ setFgColor('#000000');
 setBgColor('#ffffff');
 setTool('pencil');
 setBrushSize(1);
+registerInitialDocument();
 
 // ─── Timeline Resizer (Height Splitter) ──────────────────────────
 const timelineElement = document.getElementById('timeline');
@@ -6494,7 +7460,12 @@ if (btnLassoTransform) {
     if ((state.tool === 'lasso' || state.tool === 'magicwand') && state.lassoActive) {
       state.lassoTransformMode = !state.lassoTransformMode;
       if (state.lassoTransformMode) {
-        if (!state.lassoSelectionCanvas) {
+        const canRefineOpaquePixels = Math.abs(state.lassoRotation || 0) < 0.000001 &&
+          Math.abs((state.lassoScaleX ?? 1) - 1) < 0.000001 &&
+          Math.abs((state.lassoScaleY ?? 1) - 1) < 0.000001;
+        if (canRefineOpaquePixels) {
+          refineSelectionToOpaquePixels();
+        } else if (!state.lassoSelectionCanvas) {
           extractLassoSelection(state.selectionMask, true, true);
         }
         btnLassoTransform.classList.add('active');

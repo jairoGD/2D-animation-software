@@ -7,7 +7,7 @@
   <title>Illustra — Illustration Software</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=7" />
+  <link rel="stylesheet" href="style.css?v=10" />
 </head>
 
 <body>
@@ -65,6 +65,15 @@
                   </svg></span>
                 Open Project <span class="menu-shortcut">Ctrl+O</span>
               </button>
+              <button class="dropdown-item" id="menu-open-images">
+                <span class="menu-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
+                    <rect x="3" y="3" width="18" height="18" rx="2" />
+                    <circle cx="8.5" cy="8.5" r="1.5" />
+                    <path d="M21 15l-5-5L5 21" />
+                  </svg></span>
+                Open Images...
+              </button>
               <!-- Open Recent submenu -->
               <div class="dropdown-submenu-wrapper" id="recent-submenu-wrapper">
                 <button class="dropdown-item dropdown-submenu-trigger" id="btn-recent-submenu">
@@ -94,12 +103,19 @@
                   </svg></span>
                 New Project <span class="menu-shortcut">Ctrl+N</span>
               </button>
+              <button class="dropdown-item" id="menu-save">
+                <span class="menu-icon"><svg viewBox="0 0 32 32" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+                    <path
+                      d="M26 0H6a6 6 0 0 0-6 6v20a6 6 0 0 0 6 6h20a6 6 0 0 0 6-6V6a6 6 0 0 0-6-6zm-6 2v3a1 1 0 1 0 2 0V2h1v7H9V2zm10 24a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V6a4 4 0 0 1 4-4h1v8a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V2h1a4 4 0 0 1 4 4zM24 14H8a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V15a1 1 0 0 0-1-1zm-1 12H9V16h14z" />
+                  </svg></span>
+                Save <span class="menu-shortcut">Ctrl+S</span>
+              </button>
               <button class="dropdown-item" id="menu-save-project">
                 <span class="menu-icon"><svg viewBox="0 0 32 32" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
                     <path
                       d="M26 0H6a6 6 0 0 0-6 6v20a6 6 0 0 0 6 6h20a6 6 0 0 0 6-6V6a6 6 0 0 0-6-6zm-6 2v3a1 1 0 1 0 2 0V2h1v7H9V2zm10 24a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V6a4 4 0 0 1 4-4h1v8a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V2h1a4 4 0 0 1 4 4zM24 14H8a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V15a1 1 0 0 0-1-1zm-1 12H9V16h14zM12 20h8a1 1 0 0 0 0-2h-8a1 1 0 0 0 0 2zM12 24h8a1 1 0 0 0 0-2h-8a1 1 0 0 0 0 2z" />
                   </svg></span>
-                Save Project <span class="menu-shortcut">Ctrl+S</span>
+                Save Project <span class="menu-shortcut">Ctrl+Alt+S</span>
               </button>
               <div class="dropdown-separator"></div>
               <button class="dropdown-item" id="menu-import-image">
@@ -126,7 +142,7 @@
                         d="M368,109 C366.896,109 366,108.104 366,107 C366,105.896 366.896,105 368,105 C369.104,105 370,105.896 370,107 C370,108.104 369.104,109 368,109 Z M368,103 C365.791,103 364,104.791 364,107 C364,109.209 365.791,111 368,111 C370.209,111 372,109.209 372,107 C372,104.791 370.209,103 368,103 Z M390,116.128 L384,110 L374.059,120.111 L370,116 L362,123.337 L362,103 C362,101.896 362.896,101 364,101 L388,101 C389.104,101 390,101.896 390,103 L390,116.128 Z M390,127 C390,128.104 389.104,129 388,129 L382.832,129 L375.464,121.535 L384,112.999 L390,118.999 L390,127 Z M364,129 C362.896,129 362,128.104 362,127 L362,126.061 L369.945,118.945 L380.001,129 L364,129 Z M388,99 L364,99 C361.791,99 360,100.791 360,103 L360,127 C360,129.209 361.791,131 364,131 L388,131 C390.209,131 392,129.209 392,127 L392,103 C392,100.791 390.209,99 388,99 Z" />
                     </g>
                   </svg></span>
-                Save Image As...
+                Save Image As... <span class="menu-shortcut">Ctrl+Shift+S</span>
               </button>
               <button class="dropdown-item" id="menu-export-animation">
                 <span class="menu-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -199,6 +215,7 @@
           </div>
         </nav>
         <input type="file" id="image-input" accept="image/*" multiple style="display: none;" />
+        <input type="file" id="image-open-input" accept="image/*" multiple style="display: none;" />
         <input type="file" id="video-input" accept="video/*" style="display: none;" />
         <input type="file" id="project-open-input" accept=".tjl" style="display: none;" />
       </div>
@@ -253,6 +270,17 @@
               All Layers
             </label>
           </div>
+
+          <div id="bucket-gap-option-container" style="display: none; align-items: center; gap: 8px;" title="Treat small openings in an outline as closed while filling">
+            <label for="bucket-gap-tolerance">Gap Tolerance:</label>
+            <input type="range" id="bucket-gap-tolerance" min="0" max="20" value="0" />
+            <span id="bucket-gap-tolerance-val">0px</span>
+          </div>
+
+          <label id="wand-similar-option-container" style="display: none; align-items: center; gap: 4px; cursor: pointer;" title="Select matching colors anywhere on the canvas using the current threshold">
+            <input type="checkbox" id="wand-select-similar" />
+            Select Similar
+          </label>
 
           <div id="lasso-options-container" style="display: none; align-items: center; gap: 8px;">
             <label>Lasso:</label>
@@ -317,6 +345,8 @@
         </button>
       </div>
     </header>
+
+    <div id="document-tabs" role="tablist" aria-label="Open documents"></div>
 
     <div id="workspace">
       <!-- Sidebar -->
@@ -753,6 +783,14 @@
       </div>
 
       <div class="adjust-group">
+        <label for="adjust-color-count">Number of Colors</label>
+        <div class="adjust-control">
+          <input type="range" id="adjust-color-count" min="0" max="8" value="0" step="1" />
+          <span id="adjust-color-count-val">Original</span>
+        </div>
+      </div>
+
+      <div class="adjust-group">
         <label>Mosaic Blur</label>
         <div class="adjust-control">
           <input type="range" id="adjust-mosaic" min="1" max="100" value="1" />
@@ -841,10 +879,10 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script>window.exports = {};</script>
   <script src="gifenc.umd.js"></script>
-  <script src="videoManager.js?v=2"></script>
-  <script src="projectManager.js?v=4"></script>
+  <script src="videoManager.js?v=3"></script>
+  <script src="projectManager.js?v=5"></script>
   <script src="exportManager.js?v=4"></script>
-  <script src="app.js?v=53"></script>
+  <script src="app.js?v=58"></script>
 </body>
 
 </html>
