@@ -7,7 +7,7 @@
   <title>Illustra — Illustration Software</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=15" />
+  <link rel="stylesheet" href="style.css?v=16" />
 </head>
 
 <body>
@@ -322,6 +322,14 @@
           </svg>
           Transform
         </button>
+        <button id="btn-lasso-free-transform" class="tool-action-btn hidden"
+          title="Drag corners or edges independently to reshape the selection">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M3 4 20 7 18 20 5 17Z" />
+            <path d="M1 2h4v4H1zM18 5h4v4h-4zM16 18h4v4h-4zM3 15h4v4H3z" fill="currentColor" stroke="none" />
+          </svg>
+          Free Transform
+        </button>
       </div>
       <div class="topbar-right">
         <div class="zoom-indicator" id="zoom-indicator">100%</div>
@@ -461,6 +469,10 @@
             </div>
           </div>
           <div class="palette-grid" id="palette-grid" style="grid-template-columns: repeat(10, 1fr); gap: 3px;"></div>
+        </div>
+
+        <div class="saved-colors-section">
+          <div id="saved-color-slots" class="saved-color-slots" role="group" aria-label="Saved project colors"></div>
         </div>
 
         <div class="layers-header">
@@ -905,9 +917,9 @@
   <script>window.exports = {};</script>
   <script src="gifenc.umd.js"></script>
   <script src="videoManager.js?v=3"></script>
-  <script src="projectManager.js?v=5"></script>
+  <script src="projectManager.js?v=6"></script>
   <script src="exportManager.js?v=4"></script>
-  <script src="app.js?v=67"></script>
+  <script src="app.js?v=70"></script>
 </body>
 
 </html>

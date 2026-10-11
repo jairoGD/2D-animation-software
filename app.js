@@ -5,10 +5,12 @@
 'use strict';
 
 // ─── State ──────────────────────────────────────────────────────
+const SAVED_COLOR_SLOT_COUNT = 12;
 const state = {
   tool: 'pencil',
   fgColor: '#000000',
   bgColor: '#ffffff',
+  savedColorSlots: Array(SAVED_COLOR_SLOT_COUNT).fill(null),
   // bgMode controls how the canvas background is displayed and exported.
   // Solid modes: 'white' | 'black' | 'color'
   // Transparent modes (checkerboard display, transparent export):
@@ -53,6 +55,8 @@ const state = {
   lassoStartOffset: { x: 0, y: 0 },
   lassoDragged: false,
   lassoTransformMode: false,
+  lassoFreeQuad: null,
+  lassoFreeDrag: null,
   lassoScaleX: 1,
   lassoScaleY: 1,
   lassoRotation: 0,
@@ -262,9 +266,165 @@ function _lightenHex(hex, amount) {
 
 function selectionNeedsResampling() {
   const epsilon = 1e-8;
-  return Math.abs(state.lassoRotation || 0) > epsilon ||
+  return !!state.lassoFreeQuad || Math.abs(state.lassoRotation || 0) > epsilon ||
     Math.abs((state.lassoScaleX ?? 1) - 1) > epsilon ||
     Math.abs((state.lassoScaleY ?? 1) - 1) > epsilon;
+}
+
+const freeWarpCache = new WeakMap();
+
+// Four corners are stored clockwise: top-left, top-right, bottom-right, bottom-left.
+function freeQuadFromAffine() {
+  const [tl, tr, bl, br] = getLassoTransformHandles().corners;
+  return [tl, tr, br, bl].map(point => ({ ...point }));
+}
+
+function isValidFreeQuad(quad) {
+  if (!quad || quad.length !== 4 || quad.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return false;
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = quad[i], b = quad[(i + 1) % 4], c = quad[(i + 2) % 4];
+    const cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+    if (Math.abs(cross) < 0.01) return false;
+    if (sign && Math.sign(cross) !== sign) return false;
+    sign = Math.sign(cross);
+  }
+  return true;
+}
+
+function freeQuadHomography(quad) {
+  const [tl, tr, br, bl] = quad;
+  const dx1 = tr.x - br.x, dx2 = bl.x - br.x, dx3 = tl.x - tr.x + br.x - bl.x;
+  const dy1 = tr.y - br.y, dy2 = bl.y - br.y, dy3 = tl.y - tr.y + br.y - bl.y;
+  const determinant = dx1 * dy2 - dx2 * dy1;
+  if (Math.abs(determinant) < 1e-10) return null;
+  const g = (dx3 * dy2 - dx2 * dy3) / determinant;
+  const h = (dx1 * dy3 - dx3 * dy1) / determinant;
+  return {
+    a: tr.x - tl.x + g * tr.x, b: bl.x - tl.x + h * bl.x, c: tl.x,
+    d: tr.y - tl.y + g * tr.y, e: bl.y - tl.y + h * bl.y, f: tl.y,
+    g, h
+  };
+}
+
+function projectFreePoint(point, box, matrix) {
+  const u = (point.x - box.x) / box.w, v = (point.y - box.y) / box.h;
+  const divisor = matrix.g * u + matrix.h * v + 1;
+  return {
+    x: (matrix.a * u + matrix.b * v + matrix.c) / divisor,
+    y: (matrix.d * u + matrix.e * v + matrix.f) / divisor
+  };
+}
+
+function renderFreeWarp(source, smooth = false) {
+  const quad = state.lassoFreeQuad;
+  if (!source || !isValidFreeQuad(quad)) return null;
+  const key = `${quad.flatMap(p => [p.x, p.y]).join(',')}|${smooth}|${source.width}|${source.height}`;
+  const cached = freeWarpCache.get(source);
+  if (cached && cached.key === key) return cached.result;
+
+  const matrix = freeQuadHomography(quad);
+  if (!matrix) return null;
+  const A = matrix.e - matrix.f * matrix.h;
+  const B = matrix.c * matrix.h - matrix.b;
+  const C = matrix.b * matrix.f - matrix.c * matrix.e;
+  const D = matrix.f * matrix.g - matrix.d;
+  const E = matrix.a - matrix.c * matrix.g;
+  const F = matrix.c * matrix.d - matrix.a * matrix.f;
+  const G = matrix.d * matrix.h - matrix.e * matrix.g;
+  const H = matrix.b * matrix.g - matrix.a * matrix.h;
+  const I = matrix.a * matrix.e - matrix.b * matrix.d;
+  const left = Math.max(-canvasW, Math.floor(Math.min(...quad.map(p => p.x))));
+  const top = Math.max(-canvasH, Math.floor(Math.min(...quad.map(p => p.y))));
+  const right = Math.min(canvasW * 2, Math.ceil(Math.max(...quad.map(p => p.x))));
+  const bottom = Math.min(canvasH * 2, Math.ceil(Math.max(...quad.map(p => p.y))));
+  const width = right - left, height = bottom - top;
+  if (width < 1 || height < 1) return null;
+
+  const sourceData = source.getContext('2d').getImageData(0, 0, source.width, source.height).data;
+  const output = document.createElement('canvas');
+  output.width = width; output.height = height;
+  const outCtx = output.getContext('2d');
+  const image = outCtx.createImageData(width, height);
+  const dest = image.data;
+  const sw = source.width, sh = source.height;
+  for (let y = 0; y < height; y++) {
+    const py = top + y + 0.5;
+    for (let x = 0; x < width; x++) {
+      const px = left + x + 0.5;
+      const denominator = G * px + H * py + I;
+      if (Math.abs(denominator) < 1e-10) continue;
+      const u = (A * px + B * py + C) / denominator;
+      const v = (D * px + E * py + F) / denominator;
+      if (u < 0 || u >= 1 || v < 0 || v >= 1) continue;
+      const dst = (y * width + x) * 4;
+      if (!smooth) {
+        const src = (Math.floor(v * sh) * sw + Math.floor(u * sw)) * 4;
+        dest[dst] = sourceData[src]; dest[dst + 1] = sourceData[src + 1];
+        dest[dst + 2] = sourceData[src + 2]; dest[dst + 3] = sourceData[src + 3];
+      } else {
+        const sx = u * sw - 0.5, sy = v * sh - 0.5;
+        const x0 = Math.floor(sx), y0 = Math.floor(sy);
+        let alpha = 0, red = 0, green = 0, blue = 0;
+        for (let j = 0; j < 2; j++) for (let i = 0; i < 2; i++) {
+          const xx = x0 + i, yy = y0 + j;
+          if (xx < 0 || xx >= sw || yy < 0 || yy >= sh) continue;
+          const weight = (i ? sx - x0 : 1 - (sx - x0)) * (j ? sy - y0 : 1 - (sy - y0));
+          const src = (yy * sw + xx) * 4;
+          const coverage = weight * sourceData[src + 3];
+          alpha += coverage;
+          red += sourceData[src] * coverage;
+          green += sourceData[src + 1] * coverage;
+          blue += sourceData[src + 2] * coverage;
+        }
+        if (alpha) {
+          dest[dst] = red / alpha; dest[dst + 1] = green / alpha;
+          dest[dst + 2] = blue / alpha; dest[dst + 3] = alpha;
+        }
+      }
+    }
+  }
+  outCtx.putImageData(image, 0, 0);
+  const result = { canvas: output, x: left, y: top };
+  freeWarpCache.set(source, { key, result });
+  return result;
+}
+
+function flattenFreeSelection() {
+  if (!state.lassoFreeQuad || !state.lassoSelectionCanvas || !state.lassoMaskCanvas) return;
+  const matrix = freeQuadHomography(state.lassoFreeQuad);
+  const box = state.lassoBoundingBox;
+  const paths = (state.lassoPaths || []).map(path => path.map(point => projectFreePoint(point, box, matrix)));
+  const warped = renderFreeWarp(state.lassoSelectionCanvas, isAntiAliasingEnabled());
+  const mask = renderFreeWarp(state.lassoMaskCanvas, false);
+  if (!warped || !mask) return;
+  state.lassoSelectionCanvas = warped.canvas;
+  state.lassoMaskCanvas = mask.canvas;
+  state.lassoBoundingBox = { x: warped.x, y: warped.y, w: warped.canvas.width, h: warped.canvas.height };
+  state.lassoPaths = paths;
+  state.lassoPath = paths[0] || [];
+  state.lassoFreeQuad = null;
+  state.lassoFreeDrag = null;
+  state.lassoTransformMode = false;
+  state.lassoCurrentOffset = { x: 0, y: 0 };
+  state.lassoPrevOffset = { x: 0, y: 0 };
+  state.lassoScaleX = state.lassoScaleY = 1;
+  state.lassoRotation = 0;
+  updateSelectionMask();
+  document.getElementById('btn-lasso-free-transform')?.classList.remove('active');
+}
+
+function syncSelectionTransformButtons() {
+  const visible = state.lassoActive && (state.tool === 'lasso' || state.tool === 'magicwand');
+  for (const [id, active] of [
+    ['btn-lasso-transform', state.lassoTransformMode],
+    ['btn-lasso-free-transform', !!state.lassoFreeQuad]
+  ]) {
+    const button = document.getElementById(id);
+    if (!button) continue;
+    button.classList.toggle('hidden', !visible);
+    button.classList.toggle('active', visible && active);
+  }
 }
 
 function compositeAll() {
@@ -489,6 +649,20 @@ function compositeAll() {
         if (state.lassoActive && state.lassoSelectionCanvas && l === layers[activeLayerIdx]) {
           displayCtx.save();
           displayCtx.imageSmoothingEnabled = selectionNeedsResampling() && isAntiAliasingEnabled();
+          if (state.lassoFreeQuad) {
+            let source = state.lassoSelectionCanvas;
+            if (state.colorRampPreview && state.colorRampPreview.active) {
+              const filtered = document.createElement('canvas');
+              filtered.width = source.width; filtered.height = source.height;
+              filtered.getContext('2d').drawImage(source, 0, 0);
+              applyLUTToCanvas(filtered, state.colorRampPreview.lut);
+              source = filtered;
+            } else if (state.colorAdjustPreview) {
+              source = renderColorAdjustment(source, { ...state.colorAdjustPreview, previewCache: null });
+            }
+            const warped = renderFreeWarp(source, isAntiAliasingEnabled());
+            if (warped) displayCtx.drawImage(warped.canvas, warped.x, warped.y);
+          } else {
           const cx = state.lassoBoundingBox.x + state.lassoCurrentOffset.x + state.lassoBoundingBox.w / 2;
           const cy = state.lassoBoundingBox.y + state.lassoCurrentOffset.y + state.lassoBoundingBox.h / 2;
           displayCtx.translate(cx, cy);
@@ -534,6 +708,7 @@ function compositeAll() {
               state.lassoBoundingBox.x + state.lassoCurrentOffset.x,
               state.lassoBoundingBox.y + state.lassoCurrentOffset.y
             );
+          }
           }
           displayCtx.restore();
         }
@@ -1485,14 +1660,14 @@ function initCanvas(w, h, bgColor = '#ffffff') {
 
 // ─── Multi-document Tabs ────────────────────────────────────────
 const DOCUMENT_STATE_KEYS = [
-  'tool', 'fgColor', 'bgColor', 'bgMode', 'brushSize', 'brushHardness',
+  'tool', 'fgColor', 'bgColor', 'savedColorSlots', 'bgMode', 'brushSize', 'brushHardness',
   'brushSpacing', 'brushBlurRadius', 'brushBlurStrength', 'toolSizes',
   'opacity', 'bucketThreshold', 'bucketGapTolerance', 'wandSelectSimilar', 'zoom', 'panX', 'panY', 'currentFrame',
   'totalFrames', 'fps', 'loop', 'onionSkin', 'history', 'redoStack',
   'lassoType', 'lassoPath', 'lassoPaths', 'lassoActive', 'lassoAnimState',
   'lassoSelectionCanvas', 'lassoMaskCanvas', 'lassoBoundingBox',
   'lassoCurrentOffset', 'lassoPrevOffset', 'lassoStartOffset',
-  'lassoDragged', 'lassoTransformMode', 'lassoScaleX', 'lassoScaleY',
+  'lassoDragged', 'lassoTransformMode', 'lassoFreeQuad', 'lassoScaleX', 'lassoScaleY',
   'lassoRotation', 'lassoScaleCorner', 'lassoScalePivot', 'lassoDragStart',
   'lassoBaseScale', 'lassoBaseScaleX', 'lassoBaseScaleY',
   'lassoBaseRotation', 'selectionMask', 'lassoCutPending', 'allLayersActive',
@@ -1522,6 +1697,7 @@ function captureActiveDocument() {
 }
 
 function resetDocumentRuntime() {
+  state.savedColorSlots = Array(SAVED_COLOR_SLOT_COUNT).fill(null);
   state.history = [];
   state.redoStack = [];
   state.currentFrame = 0;
@@ -1545,6 +1721,7 @@ function resetDocumentRuntime() {
   state.isDrawing = false;
   state.isPanning = false;
   state.isMovingAllBitmaps = false;
+  state.lassoFreeDrag = null;
   state.colorAdjustPreview = null;
   state.colorRampPreview = null;
   state.lassoActive = false;
@@ -1558,6 +1735,7 @@ function resetDocumentRuntime() {
   state.lassoStartOffset = { x: 0, y: 0 };
   state.lassoDragged = false;
   state.lassoTransformMode = false;
+  state.lassoFreeQuad = null;
   state.lassoScaleX = 1;
   state.lassoScaleY = 1;
   state.lassoRotation = 0;
@@ -1650,6 +1828,7 @@ function syncDocumentUi() {
 
   setFgColor(state.fgColor);
   setBgColor(state.bgColor);
+  renderSavedColorSlots();
   setTool(state.tool);
   setBrushSize(state.brushSize);
 
@@ -1659,6 +1838,7 @@ function syncDocumentUi() {
       (state.tool !== 'lasso' && state.tool !== 'magicwand'));
     transformButton.classList.toggle('active', !!state.lassoTransformMode);
   }
+  syncSelectionTransformButtons();
 
   if (typeof syncDOMVideos === 'function') syncDOMVideos();
   renderLayerPanel();
@@ -1682,6 +1862,7 @@ function restoreDocument(doc) {
   state.isDrawing = false;
   state.isPanning = false;
   state.isMovingAllBitmaps = false;
+  state.lassoFreeDrag = null;
   window.currentProjectHandle = doc.projectHandle || null;
   window.currentProjectName = doc.projectName || null;
   document.title = `Illustra (${doc.name})`;
@@ -1905,7 +2086,7 @@ function applyTransform() {
   selectionOverlay.style.transform = t;
   updateSelectionScreenStrokes();
   tileCanvas.style.transform = 'none';
-  if (state.lassoActive && state.lassoTransformMode) drawLassoSelectionOutline();
+  if (state.lassoActive && (state.lassoTransformMode || state.lassoFreeQuad)) drawLassoSelectionOutline();
   updateTileCanvas();
   
   // Real-time sync of video layers during pan/zoom
@@ -2065,6 +2246,7 @@ function snapshotSelection() {
     scaleY: state.lassoScaleY,
     rotation: state.lassoRotation,
     transformMode: state.lassoTransformMode,
+    freeQuad: state.lassoFreeQuad ? state.lassoFreeQuad.map(point => ({ ...point })) : null,
     selectionMask: state.selectionMask ? new Uint8Array(state.selectionMask) : null
   };
 }
@@ -2076,7 +2258,10 @@ function restoreSelectionSnapshot(selection) {
     transformButton.classList.add('hidden');
     transformButton.classList.remove('active');
   }
-  if (!selection || !selection.active) return;
+  if (!selection || !selection.active) {
+    syncSelectionTransformButtons();
+    return;
+  }
 
   const restoreCanvas = snapshot => {
     if (!snapshot) return null;
@@ -2100,12 +2285,14 @@ function restoreSelectionSnapshot(selection) {
   state.lassoScaleY = selection.scaleY;
   state.lassoRotation = selection.rotation;
   state.lassoTransformMode = selection.transformMode;
+  state.lassoFreeQuad = selection.freeQuad ? selection.freeQuad.map(point => ({ ...point })) : null;
   state.selectionMask = selection.selectionMask ? new Uint8Array(selection.selectionMask) : null;
 
   if (transformButton) {
     transformButton.classList.remove('hidden');
     transformButton.classList.toggle('active', state.lassoTransformMode);
   }
+  syncSelectionTransformButtons();
   drawLassoSelectionOutline();
 }
 
@@ -2231,6 +2418,7 @@ function flashUndoRedo(type) {
 function discardLassoSelection() {
   // If there are floating pixels (extracted but not yet baked), bake them back
   // so that undo/redo can properly restore the pixel state.
+  flattenFreeSelection();
   if (state.lassoSelectionCanvas && state.lassoBoundingBox) {
     const lctx = getLCtx();
     if (lctx) {
@@ -2265,9 +2453,12 @@ function discardLassoSelection() {
   state.lassoDragStart       = null;
   state.lassoCutPending      = false;
   state.lassoTransformMode   = false;
+  state.lassoFreeQuad        = null;
+  state.lassoFreeDrag        = null;
   state.selectionMask        = null;
   pctx.clearRect(0, 0, canvasW, canvasH);
   selectionOverlay.replaceChildren();
+  syncSelectionTransformButtons();
 }
 
 // Used ONLY by undo/redo — clears lasso state WITHOUT baking floating pixels.
@@ -2287,9 +2478,12 @@ function _clearLassoStateOnly() {
   state.lassoDragStart       = null;
   state.lassoCutPending      = false;
   state.lassoTransformMode   = false;
+  state.lassoFreeQuad        = null;
+  state.lassoFreeDrag        = null;
   state.selectionMask        = null;
   pctx.clearRect(0, 0, canvasW, canvasH);
   selectionOverlay.replaceChildren();
+  syncSelectionTransformButtons();
 }
 
 function undo() {
@@ -2386,6 +2580,7 @@ function updateSelectionMask(providedMask) {
 
 function bakeFloatingSelectionOnly() {
   if (!state.lassoActive || !state.lassoSelectionCanvas) return;
+  flattenFreeSelection();
   const lctx = getLCtx();
   if (lctx) {
     markActiveFrameAsKeyframe();
@@ -2479,6 +2674,8 @@ function bakeFloatingSelectionOnly() {
   
   state.lassoSelectionCanvas = null;
   state.lassoTransformMode  = false;
+  state.lassoFreeQuad       = null;
+  state.lassoFreeDrag       = null;
   state.lassoCurrentOffset  = { x: 0, y: 0 };
   state.lassoPrevOffset     = { x: 0, y: 0 };
   state.lassoStartOffset    = { x: 0, y: 0 };
@@ -2493,6 +2690,7 @@ function bakeFloatingSelectionOnly() {
     btn.classList.add('hidden');
     btn.classList.remove('active');
   }
+  syncSelectionTransformButtons();
   
   pctx.clearRect(0, 0, canvasW, canvasH);
   if (lctx) {
@@ -3191,6 +3389,62 @@ function renderLassoTransformHandles() {
   selectionOverlay.appendChild(group);
 }
 
+function getFreeTransformHandles() {
+  const corners = state.lassoFreeQuad;
+  if (!corners) return null;
+  const edges = corners.map((point, i) => ({
+    x: (point.x + corners[(i + 1) % 4].x) / 2,
+    y: (point.y + corners[(i + 1) % 4].y) / 2
+  }));
+  return { corners, edges };
+}
+
+function pointInFreeQuad(x, y, quad) {
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = quad[i], b = quad[(i + 1) % 4];
+    const cross = (b.x - a.x) * (y - a.y) - (b.y - a.y) * (x - a.x);
+    if (Math.abs(cross) < 0.01) continue;
+    if (sign && Math.sign(cross) !== sign) return false;
+    sign = Math.sign(cross);
+  }
+  return true;
+}
+
+function renderFreeTransformHandles() {
+  const handles = getFreeTransformHandles();
+  if (!handles) return;
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const group = document.createElementNS(svgNS, 'g');
+  const border = document.createElementNS(svgNS, 'path');
+  border.setAttribute('d', handles.corners.map((p, i) => `${i ? 'L' : 'M'} ${p.x} ${p.y}`).join(' ') + ' Z');
+  border.setAttribute('fill', 'none');
+  border.setAttribute('stroke', '#ffffff');
+  setSelectionScreenStroke(border, 1);
+  group.appendChild(border);
+  const size = 8 / state.zoom;
+  handles.corners.forEach(point => {
+    const square = document.createElementNS(svgNS, 'rect');
+    square.setAttribute('x', point.x - size / 2);
+    square.setAttribute('y', point.y - size / 2);
+    square.setAttribute('width', size);
+    square.setAttribute('height', size);
+    square.setAttribute('fill', '#ffffff');
+    square.setAttribute('stroke', '#000000');
+    setSelectionScreenStroke(square, 1);
+    group.appendChild(square);
+  });
+  handles.edges.forEach(point => {
+    const diamond = document.createElementNS(svgNS, 'path');
+    diamond.setAttribute('d', `M ${point.x} ${point.y - size / 2} L ${point.x + size / 2} ${point.y} L ${point.x} ${point.y + size / 2} L ${point.x - size / 2} ${point.y} Z`);
+    diamond.setAttribute('fill', '#ffffff');
+    diamond.setAttribute('stroke', '#000000');
+    setSelectionScreenStroke(diamond, 1);
+    group.appendChild(diamond);
+  });
+  selectionOverlay.appendChild(group);
+}
+
 function drawLassoPreview() {
   previewCanvas.style.mixBlendMode = 'difference';
   pctx.clearRect(0, 0, canvasW, canvasH);
@@ -3230,6 +3484,15 @@ function drawLassoSelectionOutline() {
   }
   const ox = state.lassoCurrentOffset.x;
   const oy = state.lassoCurrentOffset.y;
+
+  if (state.lassoFreeQuad && state.lassoBoundingBox) {
+    const matrix = freeQuadHomography(state.lassoFreeQuad);
+    const sourcePaths = state.lassoPaths?.length ? state.lassoPaths : paths;
+    const warpedPaths = sourcePaths.map(path => path.map(point => projectFreePoint(point, state.lassoBoundingBox, matrix)));
+    renderSelectionOverlay([{ paths: warpedPaths }]);
+    renderFreeTransformHandles();
+    return;
+  }
 
   // Keep the outline and transform controls in the SVG overlay so they can
   // extend beyond the artwork canvas while staying fixed-size on screen.
@@ -3290,9 +3553,12 @@ function extractLassoSelection(providedMask = null, forceKeepFloating = false, e
   state.lassoScaleX = 1;
   state.lassoScaleY = 1;
   state.lassoRotation = 0;
+  state.lassoFreeQuad = null;
+  state.lassoFreeDrag = null;
 
   const btn = document.getElementById('btn-lasso-transform');
   if (btn) btn.classList.remove('hidden');
+  syncSelectionTransformButtons();
 
   // Create a mask canvas
   const maskCanvas = document.createElement('canvas');
@@ -3856,6 +4122,23 @@ function getExistingSelectionMask() {
   const mask = new Uint8Array(canvasW * canvasH);
   if (!state.lassoActive || !state.lassoMaskCanvas || !state.lassoBoundingBox) return mask;
 
+  if (state.lassoFreeQuad) {
+    const warped = renderFreeWarp(state.lassoMaskCanvas, false);
+    if (!warped) return mask;
+    const data = warped.canvas.getContext('2d').getImageData(0, 0, warped.canvas.width, warped.canvas.height).data;
+    for (let y = 0; y < warped.canvas.height; y++) {
+      const cy = y + warped.y;
+      if (cy < 0 || cy >= canvasH) continue;
+      for (let x = 0; x < warped.canvas.width; x++) {
+        const cx = x + warped.x;
+        if (cx >= 0 && cx < canvasW && data[(y * warped.canvas.width + x) * 4 + 3] > 128) {
+          mask[cy * canvasW + cx] = 1;
+        }
+      }
+    }
+    return mask;
+  }
+
   const maskCanvas = document.createElement('canvas');
   maskCanvas.width = canvasW || 1; maskCanvas.height = canvasH || 1;
   const mctx = maskCanvas.getContext('2d');
@@ -3927,6 +4210,7 @@ function invertSelection() {
 
 function bakeLassoSelection(recordHistory = true) {
   if (!state.lassoActive || !state.lassoSelectionCanvas) return;
+  flattenFreeSelection();
   const lctx = getLCtx();
   if (lctx) {
     markActiveFrameAsKeyframe();
@@ -3961,6 +4245,8 @@ function bakeLassoSelection(recordHistory = true) {
   state.lassoDragged        = false;
   state.lassoCutPending     = false;
   state.lassoTransformMode  = false;
+  state.lassoFreeQuad       = null;
+  state.lassoFreeDrag       = null;
   state.selectionMask       = null;
   
   const btn = document.getElementById('btn-lasso-transform');
@@ -3968,6 +4254,7 @@ function bakeLassoSelection(recordHistory = true) {
     btn.classList.add('hidden');
     btn.classList.remove('active');
   }
+  syncSelectionTransformButtons();
   
   pctx.clearRect(0, 0, canvasW, canvasH);
   selectionOverlay.replaceChildren();
@@ -4478,6 +4765,28 @@ function smoothStroke(tool, x, y, pressure = 1) {
 }
 
 // ─── Pointer Events ──────────────────────────────────────────────
+function beginBitmapMove(e, moveAllLayers) {
+  state.isMovingAllBitmaps = true;
+  state.moveAllLayers = moveAllLayers;
+  const {x, y} = clientToCanvas(e.clientX, e.clientY);
+  state.moveAllStartX = x;
+  state.moveAllStartY = y;
+  state.moveAllCurrentDX = 0;
+  state.moveAllCurrentDY = 0;
+  container.setPointerCapture(e.pointerId);
+  if (state.lassoActive) {
+    bakeLassoSelection();
+    compositeAll();
+  }
+  const targets = moveAllLayers ? layers : [layers[activeLayerIdx]];
+  targets.forEach(l => {
+    if (!l || l.isVideo) return;
+    l.frames.forEach(f => {
+      if (f.canvas) syncBackingCanvas(f);
+    });
+  });
+}
+
 container.addEventListener('pointerdown', e => {
   if (e.button !== 0 && e.button !== 1) return;
   e.preventDefault();
@@ -4500,25 +4809,7 @@ container.addEventListener('pointerdown', e => {
     return;
   } else if (e.button === 1) {
     // Begin MMB Move Bitmaps
-    state.isMovingAllBitmaps = true;
-    state.moveAllLayers = e.shiftKey;
-    const {x, y} = clientToCanvas(e.clientX, e.clientY);
-    state.moveAllStartX = x;
-    state.moveAllStartY = y;
-    state.moveAllCurrentDX = 0;
-    state.moveAllCurrentDY = 0;
-    container.setPointerCapture(e.pointerId);
-    if (state.lassoActive) {
-      bakeLassoSelection();
-      compositeAll();
-    }
-    const targets = state.moveAllLayers ? layers : [layers[activeLayerIdx]];
-    targets.forEach(l => {
-      if (!l || l.isVideo) return;
-      l.frames.forEach(f => {
-        if (f.canvas) syncBackingCanvas(f);
-      });
-    });
+    beginBitmapMove(e, e.shiftKey);
     return;
   }
 
@@ -4530,7 +4821,7 @@ container.addEventListener('pointerdown', e => {
   state.clickStartTime = Date.now();
 
   // Click outside canvas handling (discard selection if left click outside white page)
-  if (state.lassoActive && !state.lassoTransformMode &&
+  if (state.lassoActive && !state.lassoTransformMode && !state.lassoFreeQuad &&
       (x < 0 || x >= canvasW || y < 0 || y >= canvasH)) {
     if (!state.spaceDown && e.button === 0) {
       discardLassoSelection(); // bakes floating pixels back first
@@ -4552,6 +4843,34 @@ container.addEventListener('pointerdown', e => {
 
   // ── Lasso and Magic Wand tool handling ───────────────────────────
   if (state.tool === 'lasso' || state.tool === 'magicwand') {
+    if (state.lassoFreeQuad) {
+      const handles = getFreeTransformHandles();
+      const tolerance = 10 / state.zoom;
+      let kind = null, index = -1, nearest = tolerance;
+      for (let i = 0; i < 4; i++) {
+        const distance = Math.hypot(x - handles.corners[i].x, y - handles.corners[i].y);
+        if (distance <= nearest) {
+          kind = 'corner'; index = i; nearest = distance;
+        }
+      }
+      for (let i = 0; i < 4; i++) {
+        const distance = Math.hypot(x - handles.edges[i].x, y - handles.edges[i].y);
+        if (distance < nearest) {
+          kind = 'edge'; index = i; nearest = distance;
+        }
+      }
+      if (!kind && (e.ctrlKey || pointInFreeQuad(x, y, handles.corners))) kind = 'move';
+      if (kind) {
+        state.lassoFreeDrag = {
+          kind, index, startX: x, startY: y,
+          corners: handles.corners.map(point => ({ ...point }))
+        };
+        state.isDrawing = true;
+        state.lassoDragged = true;
+        container.setPointerCapture(e.pointerId);
+        return;
+      }
+    }
     if (state.lassoTransformMode && state.lassoActive && state.lassoBoundingBox) {
       const handles = getLassoTransformHandles();
       const cx = state.lassoBoundingBox.x + state.lassoCurrentOffset.x + state.lassoBoundingBox.w / 2;
@@ -4645,7 +4964,7 @@ container.addEventListener('pointerdown', e => {
     }
 
     if (e.ctrlKey) {
-      // Move mode: drag the floating selection
+      // Move the floating selection, or the entire active layer if none exists.
       if (state.lassoActive) {
         if (!state.lassoSelectionCanvas) {
           extractLassoSelection(state.selectionMask, true, true);
@@ -4656,6 +4975,8 @@ container.addEventListener('pointerdown', e => {
         state.lassoDragStart = { x, y };
         state.lassoStartOffset = { ...state.lassoCurrentOffset };
         container.setPointerCapture(e.pointerId);
+      } else {
+        beginBitmapMove(e, false);
       }
     } else {
       // Selection mode: start drawing new path
@@ -4680,8 +5001,10 @@ container.addEventListener('pointerdown', e => {
           state.lassoActive = false;
         }
         state.lassoTransformMode = false;
+        state.lassoFreeQuad = null;
         const btn = document.getElementById('btn-lasso-transform');
         if (btn) btn.classList.remove('active');
+        syncSelectionTransformButtons();
         container.setPointerCapture(e.pointerId);
       }
     }
@@ -4796,6 +5119,19 @@ container.addEventListener('pointermove', e => {
 
   // ── Lasso and Magic Wand move/draw ───────────────────────────────
   if (state.tool === 'lasso' || state.tool === 'magicwand') {
+    if (state.lassoFreeDrag) {
+      const drag = state.lassoFreeDrag;
+      const dx = x - drag.startX, dy = y - drag.startY;
+      const next = drag.corners.map(point => ({ ...point }));
+      const move = i => { next[i].x += dx; next[i].y += dy; };
+      if (drag.kind === 'corner') move(drag.index);
+      else if (drag.kind === 'edge') { move(drag.index); move((drag.index + 1) % 4); }
+      else for (let i = 0; i < 4; i++) move(i);
+      if (isValidFreeQuad(next)) state.lassoFreeQuad = next;
+      compositeAll();
+      drawLassoSelectionOutline();
+      return;
+    }
     if (state.lassoDragged) {
       if (state.lassoTransformMode && state.lassoDragAction) {
         if (state.lassoDragAction === 'move') {
@@ -4972,7 +5308,7 @@ container.addEventListener('pointerup', e => {
 
   const {x, y} = clientToCanvas(e.clientX, e.clientY);
   
-  if (state.lassoActive) {
+  if (state.lassoActive && !state.lassoFreeDrag) {
     const isQuickClick = (Date.now() - state.clickStartTime < 300) && 
                          Math.hypot(x - state.clickStartX, y - state.clickStartY) < 3;
     if (isQuickClick) {
@@ -5002,6 +5338,7 @@ container.addEventListener('pointerup', e => {
   if (state.tool === 'lasso' || state.tool === 'magicwand') {
     if (state.lassoDragged) {
       // Finish drag — commit new offset
+      state.lassoFreeDrag = null;
       state.lassoDragged = false;
       state.lassoPrevOffset = { ...state.lassoCurrentOffset };
       state.selectionMask = getExistingSelectionMask();
@@ -5520,6 +5857,7 @@ function pasteExternalImage(img) {
   state.lassoBaseScaleY = 1;
   state.lassoBaseRotation = 0;
   state.lassoTransformMode = false;
+  state.lassoFreeQuad = null;
 
   updateSelectionMask();
   const transformBtn = document.getElementById('btn-lasso-transform');
@@ -5527,6 +5865,7 @@ function pasteExternalImage(img) {
     transformBtn.classList.remove('hidden');
     transformBtn.classList.remove('active');
   }
+  syncSelectionTransformButtons();
 
   compositeAll();
   drawLassoSelectionOutline();
@@ -5820,6 +6159,7 @@ function setTool(tool) {
   } else if (state.lassoActive) {
     if (transformBtn) transformBtn.classList.remove('hidden');
   }
+  syncSelectionTransformButtons();
 
   // Toggle header options containers
   const sizeOpts = document.getElementById('size-option-container');
@@ -6079,6 +6419,41 @@ const colorPicker  = document.getElementById('color-picker');
 const colorHexLabel = document.getElementById('color-hex-label');
 const fgSwatch     = document.getElementById('color-fg-swatch');
 const bgSwatch     = document.getElementById('color-bg-swatch');
+const savedColorSlots = document.getElementById('saved-color-slots');
+
+function normalizeSavedColorSlots(colors) {
+  return Array.from({ length: SAVED_COLOR_SLOT_COUNT }, (_, index) => {
+    const color = Array.isArray(colors) ? colors[index] : null;
+    return typeof color === 'string' && /^#[0-9a-f]{6}$/i.test(color)
+      ? color.toLowerCase() : null;
+  });
+}
+
+function renderSavedColorSlots() {
+  savedColorSlots.replaceChildren(...state.savedColorSlots.map((color, index) => {
+    const slot = document.createElement('button');
+    slot.type = 'button';
+    slot.className = `saved-color-slot${color ? ' filled' : ''}`;
+    slot.setAttribute('aria-label', color
+      ? `Color slot ${index + 1}: ${color}. Click to use, Shift+click to replace.`
+      : `Empty color slot ${index + 1}. Shift+click to save the current color.`);
+    slot.title = color
+      ? `${color.toUpperCase()} — click to use; Shift+click to replace`
+      : 'Shift+click to save the current color';
+    if (color) slot.style.backgroundColor = color;
+    slot.addEventListener('click', event => {
+      if (event.shiftKey) {
+        state.savedColorSlots[index] = state.fgColor.toLowerCase();
+        renderSavedColorSlots();
+      } else if (color) {
+        setFgColor(color);
+      }
+    });
+    return slot;
+  }));
+}
+
+renderSavedColorSlots();
 
 function setFgColor(hex) {
   state.fgColor = hex;
@@ -7084,6 +7459,7 @@ function autoAdjustCanvasSize() {
     const sinVal = Math.sin(state.lassoRotation || 0);
     const scaleX = state.lassoScaleX || 1;
     const scaleY = state.lassoScaleY || 1;
+    const freeMatrix = state.lassoFreeQuad ? freeQuadHomography(state.lassoFreeQuad) : null;
 
     for (let sy = 0; sy < sh; sy++) {
       for (let sx = 0; sx < sw; sx++) {
@@ -7101,8 +7477,12 @@ function autoAdjustCanvasSize() {
           const vx = rx + cx;
           const vy = ry + cy;
 
-          const gx = vx - fx;
-          const gy = vy - fy;
+          const freePoint = freeMatrix ? projectFreePoint({
+            x: state.lassoBoundingBox.x + sx + 0.5,
+            y: state.lassoBoundingBox.y + sy + 0.5
+          }, state.lassoBoundingBox, freeMatrix) : null;
+          const gx = (freePoint ? freePoint.x : vx) - fx;
+          const gy = (freePoint ? freePoint.y : vy) - fy;
 
           if (gx < minX) minX = gx;
           if (gx > maxX) maxX = gx;
@@ -7172,6 +7552,12 @@ function autoAdjustCanvasSize() {
           pt.x += selShiftX;
           pt.y += selShiftY;
         });
+      });
+    }
+    if (state.lassoFreeQuad) {
+      state.lassoFreeQuad.forEach(point => {
+        point.x += selShiftX;
+        point.y += selShiftY;
       });
     }
     updateSelectionMask();
@@ -7458,6 +7844,7 @@ if (menuColorAdjust && colorAdjustModal) {
       scaleY: state.lassoScaleY,
       rotation: state.lassoRotation,
       transformMode: state.lassoTransformMode,
+      freeQuad: state.lassoFreeQuad ? state.lassoFreeQuad.map(point => ({ ...point })) : null,
       paths: state.lassoPaths ? JSON.parse(JSON.stringify(state.lassoPaths)) : null,
       path: state.lassoPath ? JSON.parse(JSON.stringify(state.lassoPath)) : null
     };
@@ -7507,8 +7894,11 @@ if (menuColorAdjust && colorAdjustModal) {
       state.lassoScaleY = lassoBackup.scaleY;
       state.lassoRotation = lassoBackup.rotation;
       state.lassoTransformMode = lassoBackup.transformMode;
+      state.lassoFreeQuad = lassoBackup.freeQuad;
       state.lassoPaths = lassoBackup.paths;
       state.lassoPath = lassoBackup.path;
+      syncSelectionTransformButtons();
+      drawLassoSelectionOutline();
     }
     
     updateSVGFilter(0, 256); // reset filter
@@ -7745,6 +8135,7 @@ const btnLassoTransform = document.getElementById('btn-lasso-transform');
 if (btnLassoTransform) {
   btnLassoTransform.addEventListener('click', () => {
     if ((state.tool === 'lasso' || state.tool === 'magicwand') && state.lassoActive) {
+      if (state.lassoFreeQuad) flattenFreeSelection();
       state.lassoTransformMode = !state.lassoTransformMode;
       if (state.lassoTransformMode) {
         const canRefineOpaquePixels = Math.abs(state.lassoRotation || 0) < 0.000001 &&
@@ -7759,9 +8150,33 @@ if (btnLassoTransform) {
       } else {
         btnLassoTransform.classList.remove('active');
       }
+      syncSelectionTransformButtons();
       drawLassoSelectionOutline();
       saveHistory();
     }
+  });
+}
+
+const btnLassoFreeTransform = document.getElementById('btn-lasso-free-transform');
+if (btnLassoFreeTransform) {
+  btnLassoFreeTransform.addEventListener('click', () => {
+    if ((state.tool !== 'lasso' && state.tool !== 'magicwand') || !state.lassoActive) return;
+    if (state.lassoFreeQuad) {
+      flattenFreeSelection();
+    } else {
+      const canRefineOpaquePixels = Math.abs(state.lassoRotation || 0) < 0.000001 &&
+        Math.abs((state.lassoScaleX ?? 1) - 1) < 0.000001 &&
+        Math.abs((state.lassoScaleY ?? 1) - 1) < 0.000001;
+      if (!state.lassoSelectionCanvas && canRefineOpaquePixels) refineSelectionToOpaquePixels();
+      else if (!state.lassoSelectionCanvas) extractLassoSelection(state.selectionMask, true, true);
+      if (!state.lassoSelectionCanvas || !state.lassoBoundingBox) return;
+      state.lassoFreeQuad = freeQuadFromAffine();
+      state.lassoTransformMode = false;
+    }
+    syncSelectionTransformButtons();
+    compositeAll();
+    drawLassoSelectionOutline();
+    saveHistory();
   });
 }
 
@@ -8356,6 +8771,7 @@ state.colorRampPreview = null;
       scaleY: state.lassoScaleY,
       rotation: state.lassoRotation,
       transformMode: state.lassoTransformMode,
+      freeQuad: state.lassoFreeQuad ? state.lassoFreeQuad.map(point => ({ ...point })) : null,
       paths: state.lassoPaths ? JSON.parse(JSON.stringify(state.lassoPaths)) : null,
       path: state.lassoPath ? JSON.parse(JSON.stringify(state.lassoPath)) : null
     };
@@ -8406,8 +8822,11 @@ state.colorRampPreview = null;
       state.lassoScaleY = lassoBackup.scaleY;
       state.lassoRotation = lassoBackup.rotation;
       state.lassoTransformMode = lassoBackup.transformMode;
+      state.lassoFreeQuad = lassoBackup.freeQuad;
       state.lassoPaths = lassoBackup.paths;
       state.lassoPath = lassoBackup.path;
+      syncSelectionTransformButtons();
+      drawLassoSelectionOutline();
     }
     compositeAll();
   }

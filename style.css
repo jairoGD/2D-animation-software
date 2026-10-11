@@ -489,6 +489,35 @@ body { font-family: var(--font); color: var(--text-primary); }
 }
 .palette-swatch:hover { transform: scale(1.15); border-color: var(--border-light); }
 .palette-swatch.selected { border-color: var(--accent); transform: scale(1.1); }
+.saved-colors-section {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.saved-color-slots {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 3px;
+}
+.saved-color-slot {
+  width: 100%;
+  aspect-ratio: 1;
+  min-width: 0;
+  padding: 0;
+  border: 1px solid var(--border-light);
+  border-radius: 2px;
+  cursor: pointer;
+  background-color: #fff;
+  background-image: linear-gradient(45deg, #d8d8de 25%, transparent 25%),
+    linear-gradient(-45deg, #d8d8de 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #d8d8de 75%),
+    linear-gradient(-45deg, transparent 75%, #d8d8de 75%);
+  background-size: 8px 8px;
+  background-position: 0 0, 0 4px, 4px -4px, -4px 0;
+}
+.saved-color-slot.filled { background-image: none; }
+.saved-color-slot:hover { border-color: var(--accent); }
+.saved-color-slot:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 /* ─── Canvas Area ───────────────────────────────────────────── */
 #canvas-area {
   flex: 1;

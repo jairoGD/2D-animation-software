@@ -239,6 +239,7 @@
       fps: state.fps, totalFrames: state.totalFrames,
       currentFrame: state.currentFrame,
       fgColor: state.fgColor, bgColor: state.bgColor,
+      savedColorSlots: state.savedColorSlots.slice(),
       layers: layerData
     };
 
@@ -340,6 +341,8 @@
     // Colors
     if (project.fgColor) setFgColor(project.fgColor);
     if (project.bgColor) setBgColor(project.bgColor);
+    state.savedColorSlots = normalizeSavedColorSlots(project.savedColorSlots);
+    renderSavedColorSlots();
 
     // Rebuild layers
     layers = [];
