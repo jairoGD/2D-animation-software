@@ -7,7 +7,7 @@
   <title>Illustra — Illustration Software</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=10" />
+  <link rel="stylesheet" href="style.css?v=15" />
 </head>
 
 <body>
@@ -208,6 +208,7 @@
             <button class="menu-btn" id="btn-view">View</button>
             <div class="dropdown-menu" id="menu-view-dropdown">
               <button class="dropdown-item view-menu-toggle" id="menu-view-tile" aria-pressed="false"><span class="menu-check">✓</span>Tile</button>
+              <button class="dropdown-item view-menu-entry" id="menu-view-grid"><span class="menu-check" aria-hidden="true"></span>Grid...</button>
               <div class="dropdown-separator"></div>
               <button class="dropdown-item view-menu-toggle" id="menu-view-flip-x" aria-pressed="false"><span class="menu-check">✓</span>Flip Canvas X</button>
               <button class="dropdown-item view-menu-toggle" id="menu-view-flip-y" aria-pressed="false"><span class="menu-check">✓</span>Flip Canvas Y</button>
@@ -412,18 +413,12 @@
             <span>Curve</span>
           </button>
 
-          <button class="tool-btn" id="tool-rect" data-tool="rect" title="Rectangle (R)">
+          <button class="tool-btn" id="tool-shapes" type="button" title="Shapes" aria-haspopup="menu" aria-controls="shape-popover" aria-expanded="false">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-              <rect x="3" y="5" width="18" height="14" rx="1" />
+              <rect x="2" y="9" width="11" height="10" rx="1" />
+              <path d="M17 4l5 9h-10z" />
             </svg>
-            <span>Rectangle</span>
-          </button>
-
-          <button class="tool-btn" id="tool-circle" data-tool="circle" title="Ellipse (C)">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-              <ellipse cx="12" cy="12" rx="9" ry="6" />
-            </svg>
-            <span>Ellipse</span>
+            <span>Shapes <span class="tool-submenu-caret" aria-hidden="true">▸</span></span>
           </button>
         </div>
       </aside>
@@ -432,7 +427,9 @@
       <main id="canvas-area">
         <div id="canvas-container">
           <canvas id="tile-canvas"></canvas>
+          <svg id="tile-grid-overlay" aria-hidden="true" hidden><path id="tile-grid-lines"></path></svg>
           <canvas id="main-canvas"></canvas>
+          <svg id="grid-overlay" aria-hidden="true" hidden><path id="grid-lines"></path></svg>
           <canvas id="preview-canvas"></canvas>
           <svg id="selection-overlay" aria-hidden="true"></svg>
         </div>
@@ -579,6 +576,26 @@
       <div class="modal-actions">
         <button id="modal-cancel">Cancel</button>
         <button id="modal-create" class="primary">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Grid Dialog -->
+  <div id="grid-overlay-dialog" class="hidden" role="presentation">
+    <div id="modal-grid" role="dialog" aria-modal="true" aria-labelledby="grid-dialog-title">
+      <h2 id="grid-dialog-title">Grid</h2>
+      <div class="modal-field">
+        <label for="grid-spacing-x">X spacing (px)</label>
+        <input type="number" id="grid-spacing-x" value="32" min="1" max="8000" step="1" required />
+      </div>
+      <div class="modal-field">
+        <label for="grid-spacing-y">Y spacing (px)</label>
+        <input type="number" id="grid-spacing-y" value="32" min="1" max="8000" step="1" required />
+      </div>
+      <label class="grid-enabled-label" for="grid-enabled"><input type="checkbox" id="grid-enabled" /><span>Show grid</span></label>
+      <div class="modal-actions">
+        <button id="grid-cancel" type="button">Cancel</button>
+        <button id="grid-apply" type="button" class="primary">Apply</button>
       </div>
     </div>
   </div>
@@ -876,13 +893,21 @@
     </div>
   </div>
 
+  <div id="shape-popover" class="shape-popover" role="menu" aria-label="Shapes" hidden>
+    <button type="button" class="shape-option" data-shape="rect" role="menuitemradio" aria-checked="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="1" /></svg><span>Rectangle <kbd>R</kbd></span></button>
+    <button type="button" class="shape-option" data-shape="circle" role="menuitemradio" aria-checked="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="12" rx="9" ry="6" /></svg><span>Ellipse <kbd>C</kbd></span></button>
+    <button type="button" class="shape-option" data-shape="triangle" role="menuitemradio" aria-checked="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3L22 20H2z" /></svg><span>Triangle</span></button>
+    <button type="button" class="shape-option" data-shape="star" role="menuitemradio" aria-checked="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2l3 6.4 7 .9-5.2 4.8 1.4 6.9-6.2-3.4L5.8 21l1.4-6.9L2 9.3l7-.9z" /></svg><span>Star</span></button>
+    <button type="button" class="shape-option" data-shape="heart" role="menuitemradio" aria-checked="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 21C8 17.5 2 13 2 8.5A5.5 5.5 0 0 1 12 5a5.5 5.5 0 0 1 10 3.5C22 13 16 17.5 12 21z" /></svg><span>Heart</span></button>
+  </div>
+
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
   <script>window.exports = {};</script>
   <script src="gifenc.umd.js"></script>
   <script src="videoManager.js?v=3"></script>
   <script src="projectManager.js?v=5"></script>
   <script src="exportManager.js?v=4"></script>
-  <script src="app.js?v=58"></script>
+  <script src="app.js?v=67"></script>
 </body>
 
 </html>

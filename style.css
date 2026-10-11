@@ -351,6 +351,38 @@ body { font-family: var(--font); color: var(--text-primary); }
 .tool-btn svg,
 .tool-mask-icon { flex-shrink: 0; }
 
+.tool-submenu-caret { font-size: 9px; margin-left: 2px; }
+.shape-popover {
+  position: fixed;
+  z-index: 1000;
+  width: 174px;
+  padding: 5px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+}
+.shape-popover[hidden] { display: none; }
+.shape-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 9px;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font: 11px var(--font);
+  text-align: left;
+  cursor: pointer;
+}
+.shape-option:hover, .shape-option:focus-visible { background: var(--bg-hover); color: var(--text-primary); outline: none; }
+.shape-option[aria-checked="true"] { color: var(--accent); background: rgba(167, 139, 250, .12); }
+.shape-option svg { width: 20px; height: 20px; flex-shrink: 0; }
+.shape-option span { display: flex; justify-content: space-between; align-items: center; flex: 1; }
+.shape-option kbd { color: var(--text-muted); font: 10px var(--font); }
+
 .tool-mask-icon {
   display: block;
   width: 20px;
@@ -508,7 +540,7 @@ body { font-family: var(--font); color: var(--text-primary); }
 #canvas-container.panning-active { cursor: grabbing !important; }
 #canvas-container.cursor-lasso { cursor: crosshair !important; }
 
-#tile-canvas, #main-canvas, #preview-canvas, #selection-overlay {
+#tile-canvas, #main-canvas, #grid-overlay, #preview-canvas, #selection-overlay {
   position: absolute;
   top: 0; left: 0;
   transform-origin: 0 0;
@@ -518,8 +550,25 @@ body { font-family: var(--font); color: var(--text-primary); }
   image-rendering: pixelated;
   box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 20px 60px rgba(0,0,0,0.6);
 }
-#tile-canvas, #preview-canvas, #selection-overlay {
+#tile-canvas, #grid-overlay, #preview-canvas, #selection-overlay {
   pointer-events: none;
+}
+
+#tile-grid-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+#tile-grid-overlay[hidden] { display: none; }
+#grid-overlay { overflow: visible; }
+#grid-overlay[hidden] { display: none; }
+#grid-lines, #tile-grid-lines {
+  fill: none;
+  stroke: rgba(167, 139, 250, 0.65);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
 }
 
 #tile-canvas {
@@ -532,8 +581,9 @@ body { font-family: var(--font); color: var(--text-primary); }
   box-shadow: none;
 }
 
-.view-menu-toggle .menu-check {
-  width: 12px;
+.view-menu-toggle .menu-check,
+.view-menu-entry .menu-check {
+  flex: 0 0 12px;
   color: var(--accent-2);
   opacity: 0;
 }
@@ -565,7 +615,7 @@ body { font-family: var(--font); color: var(--text-primary); }
 #pan-hint { margin-left: auto; opacity: 0.6; }
 
 /* ─── Modal ─────────────────────────────────────────────────── */
-#modal-overlay, #canvas-size-overlay, #export-overlay, #select-modify-overlay {
+#modal-overlay, #grid-overlay-dialog, #canvas-size-overlay, #export-overlay, #select-modify-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0,0,0,0.7);
@@ -575,9 +625,9 @@ body { font-family: var(--font); color: var(--text-primary); }
   justify-content: center;
   z-index: 9999;
 }
-#modal-overlay.hidden, #canvas-size-overlay.hidden, #export-overlay.hidden, #select-modify-overlay.hidden { display: none; }
+#modal-overlay.hidden, #grid-overlay-dialog.hidden, #canvas-size-overlay.hidden, #export-overlay.hidden, #select-modify-overlay.hidden { display: none; }
 
-#modal-new-canvas, #modal-canvas-size, #modal-select-modify {
+#modal-new-canvas, #modal-grid, #modal-canvas-size, #modal-select-modify {
   background: var(--bg-elevated);
   border: 1px solid var(--border-light);
   border-radius: var(--radius-lg);
@@ -586,7 +636,7 @@ body { font-family: var(--font); color: var(--text-primary); }
   box-shadow: 0 24px 80px rgba(0,0,0,0.6), 0 0 0 1px rgba(167,139,250,0.1);
   animation: fadeIn 0.2s ease;
 }
-#modal-new-canvas h2, #modal-canvas-size h2 {
+#modal-new-canvas h2, #modal-grid h2, #modal-canvas-size h2 {
   font-size: 18px;
   font-weight: 700;
   margin-bottom: 22px;
@@ -778,6 +828,16 @@ body { font-family: var(--font); color: var(--text-primary); }
 .modal-field input[type=number]:focus,
 .modal-field input[type=color]:focus { border-color: var(--accent); }
 .modal-field input[type=color] { height: 40px; padding: 3px 8px; }
+.grid-enabled-label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  margin-bottom: 16px;
+}
+.grid-enabled-label input { accent-color: var(--accent); }
 .modal-actions {
   display: flex;
   gap: 10px;
@@ -1154,6 +1214,7 @@ body { font-family: var(--font); color: var(--text-primary); }
   box-shadow: 0 4px 12px rgba(0,0,0,0.4);
 }
 .tool-btn:hover::after { opacity: 1; }
+#tool-shapes[aria-expanded="true"]::after { opacity: 0; }
 
 /* ─── Timeline Panel (Macromedia Flash Style) ────────────────────── */
 #timeline {

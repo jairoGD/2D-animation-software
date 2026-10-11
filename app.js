@@ -29,7 +29,7 @@ const state = {
   eraserCoverageWidth: 0,
   eraserCoverageHeight: 0,
   // Per-tool independent sizes (pencil / brush / eraser each remember their own)
-  toolSizes: { pencil: 1, brush: 16, eraser: 24, line: 1, rect: 4, circle: 4, curve: 1 },
+  toolSizes: { pencil: 1, brush: 16, eraser: 24, line: 1, rect: 4, circle: 4, triangle: 4, star: 4, heart: 4, curve: 1 },
   opacity: 1,
   bucketThreshold: 30,
   bucketGapTolerance: 0,
@@ -74,6 +74,8 @@ const state = {
   moveAllCurrentDY: 0,
   shapeStartX: 0,
   shapeStartY: 0,
+  shapeCurrentX: 0,
+  shapeCurrentY: 0,
   // Curve Tool State
   curveStep: 0,
   curvePoints: [],
@@ -96,14 +98,21 @@ const state = {
   isExporting: false,
   allLayersActive: false,
   viewTile: false,
+  viewGrid: false,
+  gridSpacingX: 32,
+  gridSpacingY: 32,
   viewFlipX: false,
   viewFlipY: false,
 };
 
 // ─── Canvas / Layer Setup ───────────────────────────────────────
 const tileCanvas    = document.getElementById('tile-canvas');
+const tileGridOverlay = document.getElementById('tile-grid-overlay');
+const tileGridLines = document.getElementById('tile-grid-lines');
 const mainCanvas    = document.getElementById('main-canvas');
 const previewCanvas = document.getElementById('preview-canvas');
+const gridOverlay = document.getElementById('grid-overlay');
+const gridLines = document.getElementById('grid-lines');
 const selectionOverlay = document.getElementById('selection-overlay');
 const tileCtx       = tileCanvas.getContext('2d');
 const displayCtx    = mainCanvas.getContext('2d');  // composite display
@@ -540,6 +549,7 @@ function compositeAll() {
 function updateTileCanvas() {
   container.classList.toggle('tile-view-active', state.viewTile && !state.isExporting);
   tileCanvas.style.display = state.viewTile && !state.isExporting ? 'block' : 'none';
+  updateTileGrid();
   if (!state.viewTile || state.isExporting) return;
 
   const requiredW = Math.max(1, Math.ceil(container.clientWidth));
@@ -561,6 +571,47 @@ function updateTileCanvas() {
   pattern.setTransform(new DOMMatrix([scaleX, 0, 0, scaleY, translateX, translateY]));
   tileCtx.fillStyle = pattern;
   tileCtx.fillRect(0, 0, requiredW, requiredH);
+}
+
+let tileGridCacheKey = '';
+function updateTileGrid() {
+  const visible = state.viewTile && state.viewGrid && !state.isExporting;
+  tileGridOverlay.toggleAttribute('hidden', !visible);
+  if (!visible) {
+    tileGridCacheKey = '';
+    tileGridLines.removeAttribute('d');
+    return;
+  }
+
+  const viewW = Math.max(1, Math.ceil(container.clientWidth));
+  const viewH = Math.max(1, Math.ceil(container.clientHeight));
+  const key = [viewW, viewH, canvasW, canvasH, state.zoom, state.panX, state.panY,
+    state.viewFlipX, state.viewFlipY, state.gridSpacingX, state.gridSpacingY].join('|');
+  if (key === tileGridCacheKey) return;
+  tileGridCacheKey = key;
+
+  tileGridOverlay.setAttribute('viewBox', `0 0 ${viewW} ${viewH}`);
+  tileGridOverlay.style.width = `${viewW}px`;
+  tileGridOverlay.style.height = `${viewH}px`;
+  const lines = [];
+  const appendAxis = (extent, canvasSize, spacing, pan, flipped, vertical) => {
+    const tileSize = canvasSize * state.zoom;
+    const firstTile = Math.floor(-pan / tileSize) - 1;
+    const lastTile = Math.ceil((extent - pan) / tileSize) + 1;
+    for (let tile = firstTile; tile <= lastTile; tile++) {
+      const origin = pan + tile * tileSize;
+      // Include one tile edge, but omit the opposite edge to avoid duplicate lines.
+      for (let division = 0; division < canvasSize; division += spacing) {
+        const position = origin + (flipped ? canvasSize - division : division) * state.zoom;
+        if (position < 0 || position > extent) continue;
+        const coordinate = Number(position.toFixed(3));
+        lines.push(vertical ? `M${coordinate} 0V${viewH}` : `M0 ${coordinate}H${viewW}`);
+      }
+    }
+  };
+  appendAxis(viewW, canvasW, state.gridSpacingX, state.panX, state.viewFlipX, true);
+  appendAxis(viewH, canvasH, state.gridSpacingY, state.panY, state.viewFlipY, false);
+  tileGridLines.setAttribute('d', lines.join(''));
 }
 
 // ─── Layers ──────────────────────────────────────────────────────
@@ -1417,6 +1468,7 @@ function initCanvas(w, h, bgColor = '#ffffff') {
   selectionOverlay.setAttribute('viewBox', `0 0 ${w} ${h}`);
   selectionOverlay.style.width = `${w}px`;
   selectionOverlay.style.height = `${h}px`;
+  renderGrid();
   state.bgColor = bgColor;
 
   // Reset layers to one fresh transparent layer
@@ -1444,7 +1496,7 @@ const DOCUMENT_STATE_KEYS = [
   'lassoRotation', 'lassoScaleCorner', 'lassoScalePivot', 'lassoDragStart',
   'lassoBaseScale', 'lassoBaseScaleX', 'lassoBaseScaleY',
   'lassoBaseRotation', 'selectionMask', 'lassoCutPending', 'allLayersActive',
-  'viewTile', 'viewFlipX', 'viewFlipY', 'shiftAnchor', 'curveStep',
+  'viewTile', 'viewGrid', 'gridSpacingX', 'gridSpacingY', 'viewFlipX', 'viewFlipY', 'shiftAnchor', 'curveStep',
   'curvePoints'
 ];
 
@@ -1481,6 +1533,9 @@ function resetDocumentRuntime() {
   state.panX = 0;
   state.panY = 0;
   state.viewTile = false;
+  state.viewGrid = false;
+  state.gridSpacingX = 32;
+  state.gridSpacingY = 32;
   state.viewFlipX = false;
   state.viewFlipY = false;
   state.shiftAnchor = null;
@@ -1562,6 +1617,7 @@ function syncDocumentUi() {
   selectionOverlay.setAttribute('viewBox', `0 0 ${canvasW} ${canvasH}`);
   selectionOverlay.style.width = `${canvasW}px`;
   selectionOverlay.style.height = `${canvasH}px`;
+  renderGrid();
   document.getElementById('canvas-size-display').textContent = `${canvasW} × ${canvasH} px`;
 
   const fpsInput = document.getElementById('timeline-fps');
@@ -1814,6 +1870,28 @@ function centerCanvas() {
   applyTransform();
 }
 
+function renderGrid() {
+  gridOverlay.setAttribute('viewBox', `0 0 ${canvasW} ${canvasH}`);
+  gridOverlay.style.width = `${canvasW}px`;
+  gridOverlay.style.height = `${canvasH}px`;
+  // SVG elements need the attribute toggled directly; assigning .hidden leaves it in place.
+  gridOverlay.toggleAttribute('hidden', !state.viewGrid);
+  gridLines.style.strokeWidth = String(1 / Math.max(state.zoom, 0.01));
+  if (!state.viewGrid) {
+    gridLines.removeAttribute('d');
+    updateTileGrid();
+    return;
+  }
+
+  const spacingX = Math.max(1, Math.round(state.gridSpacingX));
+  const spacingY = Math.max(1, Math.round(state.gridSpacingY));
+  const segments = [];
+  for (let x = 0; x <= canvasW; x += spacingX) segments.push(`M${x} 0V${canvasH}`);
+  for (let y = 0; y <= canvasH; y += spacingY) segments.push(`M0 ${y}H${canvasW}`);
+  gridLines.setAttribute('d', segments.join(''));
+  updateTileGrid();
+}
+
 function applyTransform() {
   const scaleX = state.zoom * (state.viewFlipX ? -1 : 1);
   const scaleY = state.zoom * (state.viewFlipY ? -1 : 1);
@@ -1821,8 +1899,11 @@ function applyTransform() {
   const translateY = state.panY + (state.viewFlipY ? canvasH * state.zoom : 0);
   const t = `matrix(${scaleX}, 0, 0, ${scaleY}, ${translateX}, ${translateY})`;
   mainCanvas.style.transform   = t;
+  gridOverlay.style.transform = t;
+  gridLines.style.strokeWidth = String(1 / Math.max(state.zoom, 0.01));
   previewCanvas.style.transform = t;
   selectionOverlay.style.transform = t;
+  updateSelectionScreenStrokes();
   tileCanvas.style.transform = 'none';
   if (state.lassoActive && state.lassoTransformMode) drawLassoSelectionOutline();
   updateTileCanvas();
@@ -2993,6 +3074,29 @@ function clearPreview() {
 }
 
 // ─── Lasso Selection Helpers ─────────────────────────────────────
+function setSelectionScreenStroke(element, width, dash = 0, offset = 0) {
+  element.setAttribute('data-screen-stroke', String(width));
+  if (dash) {
+    element.setAttribute('data-screen-dash', String(dash));
+    element.setAttribute('data-screen-offset', String(offset));
+  }
+  updateSelectionScreenStroke(element);
+}
+
+function updateSelectionScreenStroke(element) {
+  const inverseZoom = 1 / Math.max(state.zoom, 0.01);
+  element.setAttribute('stroke-width', String(Number(element.getAttribute('data-screen-stroke')) * inverseZoom));
+  const dash = Number(element.getAttribute('data-screen-dash'));
+  if (dash) {
+    element.setAttribute('stroke-dasharray', `${dash * inverseZoom} ${dash * inverseZoom}`);
+    element.setAttribute('stroke-dashoffset', String(Number(element.getAttribute('data-screen-offset')) * inverseZoom));
+  }
+}
+
+function updateSelectionScreenStrokes() {
+  selectionOverlay.querySelectorAll('[data-screen-stroke]').forEach(updateSelectionScreenStroke);
+}
+
 function renderSelectionOverlay(pathGroups) {
   selectionOverlay.replaceChildren();
   if (!pathGroups || pathGroups.length === 0) return;
@@ -3012,10 +3116,7 @@ function renderSelectionOverlay(pathGroups) {
       outline.setAttribute('d', d);
       outline.setAttribute('fill', 'none');
       outline.setAttribute('stroke', '#ffffff');
-      outline.setAttribute('stroke-width', '1.5');
-      outline.setAttribute('stroke-dasharray', '6 6');
-      outline.setAttribute('stroke-dashoffset', String(dashOffset));
-      outline.setAttribute('vector-effect', 'non-scaling-stroke');
+      setSelectionScreenStroke(outline, 1.5, 6, dashOffset);
       outline.setAttribute('shape-rendering', 'geometricPrecision');
       group.appendChild(outline);
     });
@@ -3065,16 +3166,14 @@ function renderLassoTransformHandles() {
   border.setAttribute('d', `M ${topLeft.x} ${topLeft.y} L ${topRight.x} ${topRight.y} L ${bottomRight.x} ${bottomRight.y} L ${bottomLeft.x} ${bottomLeft.y} Z`);
   border.setAttribute('fill', 'none');
   border.setAttribute('stroke', '#ffffff');
-  border.setAttribute('stroke-width', '1');
-  border.setAttribute('vector-effect', 'non-scaling-stroke');
+  setSelectionScreenStroke(border, 1);
   group.appendChild(border);
 
   const stem = document.createElementNS(svgNS, 'path');
   stem.setAttribute('d', `M ${handles.top.x} ${handles.top.y} L ${handles.rotation.x} ${handles.rotation.y}`);
   stem.setAttribute('fill', 'none');
   stem.setAttribute('stroke', '#ffffff');
-  stem.setAttribute('stroke-width', '1');
-  stem.setAttribute('vector-effect', 'non-scaling-stroke');
+  setSelectionScreenStroke(stem, 1);
   group.appendChild(stem);
 
   const size = 8 / state.zoom;
@@ -3086,8 +3185,7 @@ function renderLassoTransformHandles() {
     square.setAttribute('height', size);
     square.setAttribute('fill', '#ffffff');
     square.setAttribute('stroke', '#000000');
-    square.setAttribute('stroke-width', '1');
-    square.setAttribute('vector-effect', 'non-scaling-stroke');
+    setSelectionScreenStroke(square, 1);
     group.appendChild(square);
   });
   selectionOverlay.appendChild(group);
@@ -3972,9 +4070,11 @@ function drawShiftPreview(toX, toY) {
   clearPreview();
   if (toX === undefined) return; // nothing to draw without a target
   const { x: ax, y: ay } = state.shiftAnchor;
+  const antiAlias = isAntiAliasingEnabled();
   pctx.save();
   pctx.globalCompositeOperation = 'source-over';
-  pctx.strokeStyle = getDrawColor();
+  pctx.filter = 'none';
+  pctx.strokeStyle = antiAlias ? getDrawColor() : state.fgColor;
   pctx.lineWidth   = state.brushSize;
   pctx.lineCap     = 'round';
   pctx.setLineDash([8 / state.zoom, 6 / state.zoom]);
@@ -3982,28 +4082,145 @@ function drawShiftPreview(toX, toY) {
   pctx.moveTo(ax, ay);
   pctx.lineTo(toX, toY);
   pctx.stroke();
+  if (!antiAlias) {
+    // Canvas stroke edges are still smoothed with imageSmoothingEnabled=false.
+    // Quantize the preview's coverage just like the aliased shape strokes.
+    const margin = state.brushSize / 2 + 2;
+    const left = Math.max(0, Math.floor(Math.min(ax, toX) - margin));
+    const top = Math.max(0, Math.floor(Math.min(ay, toY) - margin));
+    const right = Math.min(canvasW, Math.ceil(Math.max(ax, toX) + margin));
+    const bottom = Math.min(canvasH, Math.ceil(Math.max(ay, toY) + margin));
+    if (right > left && bottom > top) {
+      const image = pctx.getImageData(left, top, right - left, bottom - top);
+      const alpha = Math.round(state.opacity * 255);
+      for (let i = 3; i < image.data.length; i += 4) {
+        image.data[i] = image.data[i] >= 128 ? alpha : 0;
+      }
+      pctx.putImageData(image, left, top);
+    }
+  }
   pctx.setLineDash([]);
   pctx.restore();
 }
 
-function drawPreviewRect(x0, y0, x1, y1) {
-  clearPreview();
-  configCtx(pctx, state.tool);
-  pctx.beginPath();
-  pctx.rect(Math.min(x0,x1), Math.min(y0,y1), Math.abs(x1-x0), Math.abs(y1-y0));
-  pctx.stroke();
+const SHAPE_TOOLS = ['rect', 'circle', 'triangle', 'star', 'heart'];
+const DRAG_TOOLS = ['line', 'curve', ...SHAPE_TOOLS];
+
+function constrainShapeEndpoint(x0, y0, x1, y1, shiftKey) {
+  if (!shiftKey) return { x: x1, y: y1 };
+  const size = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0));
+  return {
+    x: x0 + (x1 < x0 ? -size : size),
+    y: y0 + (y1 < y0 ? -size : size),
+  };
 }
 
-function drawPreviewCircle(x0, y0, x1, y1) {
+function previewDraggedShape(shiftKey) {
+  const { x, y } = constrainShapeEndpoint(
+    state.shapeStartX, state.shapeStartY, state.shapeCurrentX, state.shapeCurrentY, shiftKey
+  );
+  drawPreviewShape(state.shapeStartX, state.shapeStartY, x, y);
+}
+
+function traceShape(ctx, tool, x0, y0, x1, y1) {
+  const x = Math.min(x0, x1), y = Math.min(y0, y1);
+  const w = Math.abs(x1 - x0), h = Math.abs(y1 - y0);
+  if (!w || !h) return false;
+  const cx = x + w / 2, cy = y + h / 2;
+  ctx.beginPath();
+  if (tool === 'rect') {
+    ctx.rect(x, y, w, h);
+  } else if (tool === 'circle') {
+    ctx.ellipse(cx, cy, w / 2, h / 2, 0, 0, Math.PI * 2);
+  } else if (tool === 'triangle') {
+    ctx.moveTo(cx, y);
+    ctx.lineTo(x + w, y + h);
+    ctx.lineTo(x, y + h);
+    ctx.closePath();
+  } else if (tool === 'star') {
+    for (let i = 0; i < 10; i++) {
+      const angle = -Math.PI / 2 + i * Math.PI / 5;
+      const radius = i % 2 ? 0.42 : 1;
+      const px = cx + Math.cos(angle) * w / 2 * radius;
+      const py = cy + Math.sin(angle) * h / 2 * radius;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+  } else if (tool === 'heart') {
+    ctx.moveTo(cx, y + h * 0.24);
+    ctx.bezierCurveTo(x + w * 0.29, y - h * 0.08, x, y + h * 0.12, x, y + h * 0.4);
+    ctx.bezierCurveTo(x, y + h * 0.69, cx, y + h * 0.94, cx, y + h);
+    ctx.bezierCurveTo(cx, y + h * 0.94, x + w, y + h * 0.69, x + w, y + h * 0.4);
+    ctx.bezierCurveTo(x + w, y + h * 0.12, x + w * 0.71, y - h * 0.08, cx, y + h * 0.24);
+    ctx.closePath();
+  } else {
+    return false;
+  }
+  return true;
+}
+
+const shapeRasterCanvas = document.createElement('canvas');
+const shapeRasterCtx = shapeRasterCanvas.getContext('2d', { willReadFrequently: true });
+
+function drawAliasedShape(ctx, tool, x0, y0, x1, y1) {
+  const halfStroke = state.brushSize / 2;
+  const heartTop = tool === 'heart' ? Math.abs(y1 - y0) * 0.08 : 0;
+  const left = Math.max(0, Math.floor(Math.min(x0, x1) - halfStroke - 2));
+  const top = Math.max(0, Math.floor(Math.min(y0, y1) - halfStroke - heartTop - 2));
+  const right = Math.min(canvasW, Math.ceil(Math.max(x0, x1) + halfStroke + 2));
+  const bottom = Math.min(canvasH, Math.ceil(Math.max(y0, y1) + halfStroke + 2));
+  const width = right - left, height = bottom - top;
+  if (width <= 0 || height <= 0) return;
+
+  if (shapeRasterCanvas.width !== width) shapeRasterCanvas.width = width;
+  if (shapeRasterCanvas.height !== height) shapeRasterCanvas.height = height;
+  shapeRasterCtx.setTransform(1, 0, 0, 1, 0, 0);
+  shapeRasterCtx.clearRect(0, 0, width, height);
+  shapeRasterCtx.setTransform(1, 0, 0, 1, -left, -top);
+  shapeRasterCtx.filter = 'none';
+  shapeRasterCtx.strokeStyle = '#fff';
+  shapeRasterCtx.lineWidth = state.brushSize;
+  shapeRasterCtx.lineCap = 'round';
+  shapeRasterCtx.lineJoin = 'round';
+  if (!traceShape(shapeRasterCtx, tool, x0, y0, x1, y1)) return;
+  shapeRasterCtx.stroke();
+
+  const image = shapeRasterCtx.getImageData(0, 0, width, height);
+  const pixels = image.data;
+  const r = parseInt(state.fgColor.slice(1, 3), 16);
+  const g = parseInt(state.fgColor.slice(3, 5), 16);
+  const b = parseInt(state.fgColor.slice(5, 7), 16);
+  const alpha = Math.round(state.opacity * 255);
+  for (let i = 0; i < pixels.length; i += 4) {
+    if (pixels[i + 3] >= 128) {
+      pixels[i] = r;
+      pixels[i + 1] = g;
+      pixels[i + 2] = b;
+      pixels[i + 3] = alpha;
+    } else {
+      pixels[i] = pixels[i + 1] = pixels[i + 2] = pixels[i + 3] = 0;
+    }
+  }
+  shapeRasterCtx.putImageData(image, 0, 0);
+  ctx.save();
+  ctx.filter = 'none';
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(shapeRasterCanvas, left, top);
+  ctx.restore();
+}
+
+function drawShape(ctx, tool, x0, y0, x1, y1) {
+  if (isAntiAliasingEnabled()) {
+    if (traceShape(ctx, tool, x0, y0, x1, y1)) ctx.stroke();
+  } else {
+    drawAliasedShape(ctx, tool, x0, y0, x1, y1);
+  }
+}
+
+function drawPreviewShape(x0, y0, x1, y1) {
   clearPreview();
   configCtx(pctx, state.tool);
-  const rx = Math.abs(x1-x0)/2;
-  const ry = Math.abs(y1-y0)/2;
-  const cx = Math.min(x0,x1) + rx;
-  const cy = Math.min(y0,y1) + ry;
-  pctx.beginPath();
-  pctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI*2);
-  pctx.stroke();
+  drawShape(pctx, state.tool, x0, y0, x1, y1);
 }
 
 function commitShape(x0, y0, x1, y1) {
@@ -4021,18 +4238,8 @@ function commitShape(x0, y0, x1, y1) {
       lctx.lineTo(x1, y1);
       lctx.stroke();
     }
-  } else if (state.tool === 'rect') {
-    lctx.beginPath();
-    lctx.rect(Math.min(x0,x1), Math.min(y0,y1), Math.abs(x1-x0), Math.abs(y1-y0));
-    lctx.stroke();
-  } else if (state.tool === 'circle') {
-    const rx = Math.abs(x1-x0)/2;
-    const ry = Math.abs(y1-y0)/2;
-    const cx = Math.min(x0,x1)+rx;
-    const cy = Math.min(y0,y1)+ry;
-    lctx.beginPath();
-    lctx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI*2);
-    lctx.stroke();
+  } else {
+    drawShape(lctx, state.tool, x0, y0, x1, y1);
   }
   lctx.restore();
   clearPreview();
@@ -4483,7 +4690,7 @@ container.addEventListener('pointerdown', e => {
 
   // ── Shift+click: draw straight line from last released point ─────
   // Works with pencil, brush, eraser — any freehand tool
-  const isFreehand = !['line','rect','circle','fill','eyedropper','lasso','curve'].includes(state.tool);
+  const isFreehand = ![...DRAG_TOOLS, 'fill', 'eyedropper', 'lasso', 'magicwand'].includes(state.tool);
   if (e.shiftKey && isFreehand && state.shiftAnchor) {
     const lctx = getLCtx(); if (!lctx) return;
     markActiveFrameAsKeyframe();
@@ -4523,7 +4730,7 @@ container.addEventListener('pointerdown', e => {
   state.lastY = y;
   brushPoints.length = 0;
 
-  if (['line','rect','circle','curve'].includes(state.tool)) {
+  if (DRAG_TOOLS.includes(state.tool)) {
     if (state.tool === 'curve') {
       if (state.curveStep === 0) {
         state.curvePoints = [{x, y}, {x, y}];
@@ -4535,6 +4742,8 @@ container.addEventListener('pointerdown', e => {
     } else {
       state.shapeStartX = x;
       state.shapeStartY = y;
+      state.shapeCurrentX = x;
+      state.shapeCurrentY = y;
     }
   } else {
     clearPreview(); // hide old anchor while drawing
@@ -4571,7 +4780,7 @@ container.addEventListener('pointermove', e => {
   }
 
   // Show live shift-line preview while Shift is held
-  const isFreehand = !['line','rect','circle','fill','eyedropper','lasso','curve','magicwand'].includes(state.tool);
+  const isFreehand = ![...DRAG_TOOLS, 'fill', 'eyedropper', 'lasso', 'magicwand'].includes(state.tool);
   if (e.shiftKey && isFreehand && state.shiftAnchor && !state.isDrawing) {
     drawShiftPreview(x, y);
     return;
@@ -4704,7 +4913,7 @@ container.addEventListener('pointermove', e => {
     return;
   }
 
-  if (['line','rect','circle','curve'].includes(state.tool)) {
+  if (DRAG_TOOLS.includes(state.tool)) {
     if (state.tool === 'curve') {
       if (state.curveStep === 0) {
         state.curvePoints[1] = {x, y};
@@ -4716,10 +4925,10 @@ container.addEventListener('pointermove', e => {
       drawPreviewCurve();
     } else if (state.tool === 'line') {
       drawPreviewLine(state.shapeStartX, state.shapeStartY, x, y);
-    } else if (state.tool === 'rect') {
-      drawPreviewRect(state.shapeStartX, state.shapeStartY, x, y);
-    } else if (state.tool === 'circle') {
-      drawPreviewCircle(state.shapeStartX, state.shapeStartY, x, y);
+    } else if (SHAPE_TOOLS.includes(state.tool)) {
+      state.shapeCurrentX = x;
+      state.shapeCurrentY = y;
+      previewDraggedShape(e.shiftKey);
     }
   } else {
     smoothStroke(state.tool, x, y);
@@ -4825,7 +5034,7 @@ container.addEventListener('pointerup', e => {
     return;
   }
 
-  if (['line','rect','circle','curve'].includes(state.tool)) {
+  if (DRAG_TOOLS.includes(state.tool)) {
     if (state.tool === 'curve') {
       if (state.curveStep === 0) {
         state.curveStep = 1;
@@ -4837,12 +5046,15 @@ container.addEventListener('pointerup', e => {
         state.curvePoints = [];
       }
     } else {
-      commitShape(state.shapeStartX, state.shapeStartY, x, y);
+      const end = SHAPE_TOOLS.includes(state.tool)
+        ? constrainShapeEndpoint(state.shapeStartX, state.shapeStartY, x, y, e.shiftKey)
+        : { x, y };
+      commitShape(state.shapeStartX, state.shapeStartY, end.x, end.y);
     }
   } else {
     saveHistory();
     // ── Set anchor at the point where the user RELEASED the mouse ──
-    const isFreehand = !['line','rect','circle','fill','eyedropper','lasso','curve','magicwand'].includes(state.tool);
+    const isFreehand = ![...DRAG_TOOLS, 'fill', 'eyedropper', 'lasso', 'magicwand'].includes(state.tool);
     if (isFreehand) {
       state.shiftAnchor = { x: state.lastX, y: state.lastY };
       drawShiftPreview(); // show the anchor dot
@@ -4851,7 +5063,7 @@ container.addEventListener('pointerup', e => {
 });
 
 container.addEventListener('pointerleave', e => {
-  if (state.isDrawing && !['line','rect','circle','curve'].includes(state.tool)) {
+  if (state.isDrawing && !DRAG_TOOLS.includes(state.tool)) {
     state.isDrawing = false;
     if (state.strokeLctx) {
       state.strokeLctx.restore();
@@ -4881,7 +5093,7 @@ container.addEventListener('pointerleave', e => {
     }
 
     saveHistory();
-    const isFreehand = !['line','rect','circle','fill','eyedropper','lasso','curve','magicwand'].includes(state.tool);
+    const isFreehand = ![...DRAG_TOOLS, 'fill', 'eyedropper', 'lasso', 'magicwand'].includes(state.tool);
     if (isFreehand) {
       state.shiftAnchor = { x: state.lastX, y: state.lastY };
     }
@@ -4948,6 +5160,13 @@ function selectAllSelection() {
 let _toolBeforeCtrl = null; // stores the tool active before Ctrl held
 
 document.addEventListener('keydown', e => {
+  if (e.key === 'Shift' && state.isDrawing && SHAPE_TOOLS.includes(state.tool)) previewDraggedShape(true);
+  if (e.key === 'Escape' && !document.getElementById('shape-popover').hidden) {
+    e.preventDefault();
+    closeShapePopover();
+    document.getElementById('tool-shapes').focus();
+    return;
+  }
   // Block single-key shortcuts when typing in an input,
   // but ALWAYS allow Ctrl/Meta combos (undo, redo, new canvas, etc.)
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) && !e.ctrlKey && !e.metaKey) return;
@@ -5214,6 +5433,7 @@ document.addEventListener('keydown', e => {
 });
 
 document.addEventListener('keyup', e => {
+  if (e.key === 'Shift' && state.isDrawing && SHAPE_TOOLS.includes(state.tool)) previewDraggedShape(false);
   if (e.key === 'Alt') {
     if (state.tool === 'brush') {
       e.preventDefault();
@@ -5523,11 +5743,12 @@ container.addEventListener('drop', async (event) => {
 });
 
 // ─── Tool Selection ──────────────────────────────────────────────
-const SIZED_TOOLS = ['pencil', 'brush', 'eraser', 'line', 'rect', 'circle', 'curve'];
+const SIZED_TOOLS = ['pencil', 'brush', 'eraser', 'line', 'curve', ...SHAPE_TOOLS];
 const MIN_TOOL_SIZE = 1;
 const MAX_TOOL_SIZE = 2048;
 
 function setTool(tool) {
+  closeShapePopover();
   // Bake any floating lasso/magicwand selection before leaving selection tools
   if ((state.tool === 'lasso' || state.tool === 'magicwand') && (tool !== 'lasso' && tool !== 'magicwand')) {
     bakeFloatingSelectionOnly();
@@ -5567,15 +5788,16 @@ function setTool(tool) {
   }
 
   document.querySelectorAll('.tool-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.tool === tool);
+    btn.classList.toggle('active', btn.dataset.tool === tool || (btn.id === 'tool-shapes' && SHAPE_TOOLS.includes(tool)));
   });
+  document.querySelectorAll('.shape-option').forEach(btn => btn.setAttribute('aria-checked', String(btn.dataset.shape === tool)));
 
   // Cursor
   const cursors = {
     pencil: 'cursor-pencil', brush: 'cursor-pencil',
     eraser: 'cursor-eraser', fill: 'cursor-fill',
     eyedropper: 'cursor-eyedropper', line: 'cursor-line',
-    rect: 'cursor-rect', circle: 'cursor-circle',
+    rect: 'cursor-rect', circle: 'cursor-circle', triangle: 'cursor-rect', star: 'cursor-rect', heart: 'cursor-rect',
     lasso: 'cursor-lasso', magicwand: 'cursor-lasso',
   };
   container.className = '';
@@ -5585,6 +5807,7 @@ function setTool(tool) {
     { pencil:'Pencil active', brush:'Brush active', eraser:'Eraser active',
       fill:'Bucket active', eyedropper:'Eyedropper active',
       line:'Line active', rect:'Rectangle active', circle:'Ellipse active',
+      triangle:'Triangle active', star:'Star active', heart:'Heart active',
       lasso:'Lasso active', magicwand:'Magic Wand active' }[tool] || tool;
 
   const transformBtn = document.getElementById('btn-lasso-transform');
@@ -5630,7 +5853,7 @@ function setTool(tool) {
     if (opacityOpts) opacityOpts.style.display = 'flex';
     if (thresholdOpts) thresholdOpts.style.display = 'flex';
     if (bucketGapOpts) bucketGapOpts.style.display = 'flex';
-  } else if (['pencil', 'brush', 'eraser', 'line', 'rect', 'circle', 'curve'].includes(tool)) {
+  } else if (SIZED_TOOLS.includes(tool)) {
     if (sizeOpts) sizeOpts.style.display = 'flex';
     if (opacityOpts) opacityOpts.style.display = 'flex';
     if (tool === 'brush' || tool === 'eraser') {
@@ -5651,9 +5874,34 @@ function updateBlurOptionVisibility() {
   if (blurStrengthOpts) blurStrengthOpts.style.display = showingBlur ? 'flex' : 'none';
 }
 
-document.querySelectorAll('.tool-btn').forEach(btn => {
+document.querySelectorAll('.tool-btn[data-tool]').forEach(btn => {
   btn.addEventListener('click', () => setTool(btn.dataset.tool));
 });
+
+const shapeTrigger = document.getElementById('tool-shapes');
+const shapePopover = document.getElementById('shape-popover');
+function closeShapePopover() {
+  shapePopover.hidden = true;
+  shapeTrigger.setAttribute('aria-expanded', 'false');
+}
+shapeTrigger.addEventListener('click', () => {
+  if (!shapePopover.hidden) return closeShapePopover();
+  shapePopover.hidden = false;
+  const bounds = shapeTrigger.getBoundingClientRect();
+  const top = Math.max(8, Math.min(bounds.top, window.innerHeight - shapePopover.offsetHeight - 8));
+  shapePopover.style.top = `${top}px`;
+  shapePopover.style.left = `${Math.min(bounds.right + 8, window.innerWidth - shapePopover.offsetWidth - 8)}px`;
+  shapeTrigger.setAttribute('aria-expanded', 'true');
+  shapePopover.querySelector(`[data-shape="${state.tool}"]`)?.focus();
+});
+shapePopover.querySelectorAll('.shape-option').forEach(btn => {
+  btn.addEventListener('click', () => setTool(btn.dataset.shape));
+});
+document.addEventListener('pointerdown', event => {
+  if (!shapePopover.hidden && !shapePopover.contains(event.target) && !shapeTrigger.contains(event.target)) closeShapePopover();
+});
+window.addEventListener('resize', closeShapePopover);
+document.getElementById('sidebar').addEventListener('scroll', closeShapePopover);
 
 // Lasso Type Selection Buttons
 const btnLassoFree = document.getElementById('btn-lasso-free');
@@ -6058,6 +6306,44 @@ function setViewToggle(buttonId, stateKey) {
 setViewToggle('menu-view-tile', 'viewTile');
 setViewToggle('menu-view-flip-x', 'viewFlipX');
 setViewToggle('menu-view-flip-y', 'viewFlipY');
+
+const gridDialogOverlay = document.getElementById('grid-overlay-dialog');
+const gridSpacingXInput = document.getElementById('grid-spacing-x');
+const gridSpacingYInput = document.getElementById('grid-spacing-y');
+const gridEnabledInput = document.getElementById('grid-enabled');
+
+function closeGridDialog() {
+  gridDialogOverlay.classList.add('hidden');
+  btnView.focus();
+}
+
+document.getElementById('menu-view-grid').addEventListener('click', () => {
+  menuView.classList.remove('show');
+  gridSpacingXInput.value = state.gridSpacingX;
+  gridSpacingYInput.value = state.gridSpacingY;
+  gridEnabledInput.checked = state.viewGrid;
+  gridDialogOverlay.classList.remove('hidden');
+  gridSpacingXInput.focus();
+});
+document.getElementById('grid-cancel').addEventListener('click', closeGridDialog);
+document.getElementById('grid-apply').addEventListener('click', () => {
+  if (!gridSpacingXInput.reportValidity() || !gridSpacingYInput.reportValidity()) return;
+  state.gridSpacingX = Number(gridSpacingXInput.value);
+  state.gridSpacingY = Number(gridSpacingYInput.value);
+  state.viewGrid = gridEnabledInput.checked;
+  renderGrid();
+  closeGridDialog();
+});
+gridDialogOverlay.addEventListener('click', event => {
+  if (event.target === gridDialogOverlay) closeGridDialog();
+});
+gridDialogOverlay.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    closeGridDialog();
+  }
+});
 
 document.getElementById('menu-select-more').addEventListener('click', () => {
   menuSelect.classList.remove('show');
@@ -6468,6 +6754,7 @@ function resizeCanvas(newW, newH, offsetX = 0, offsetY = 0, isAutoAdjust = false
   selectionOverlay.setAttribute('viewBox', `0 0 ${newW} ${newH}`);
   selectionOverlay.style.width = `${newW}px`;
   selectionOverlay.style.height = `${newH}px`;
+  renderGrid();
 
   // Resize all frames in drawing layers only (video layers have no frame canvases)
   layers.forEach(l => {
