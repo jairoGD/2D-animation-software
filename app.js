@@ -5676,6 +5676,18 @@ document.addEventListener('keydown', e => {
     invertSelection();
   }
 
+  // Ctrl/Meta++ and Ctrl/Meta+- adjust an active selection one pixel per press.
+  // The + key can arrive as +, =, or NumpadAdd depending on the keyboard.
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && !isTextField && !e.target.isContentEditable && state.lassoActive) {
+    const expand = e.key === '+' || e.key === '=' || e.code === 'NumpadAdd';
+    const contract = e.key === '-' || e.code === 'NumpadSubtract';
+    if (expand || contract) {
+      e.preventDefault();
+      if (!e.repeat) modifySelection(1, expand);
+      return;
+    }
+  }
+
   // ── Lasso Copy / Cut / Paste ───────────────────────────────────────────
   // Ctrl+C — copy selection to internal clipboard (keeps selection active)
   if ((e.ctrlKey || e.metaKey) && e.key === 'c' && state.lassoActive) {
@@ -6992,8 +7004,8 @@ function modifySelection(amount, expand) {
     }
   }
 
-  // Trace all contours
-  const newPaths = traceMaskContours(dest);
+  // Keep the visible marquee on the exact edges of the modified pixel mask.
+  const newPaths = tracePixelMaskEdges(dest, canvasW, canvasH);
 
   if (newPaths.length > 0) {
     state.lassoPaths = newPaths;
