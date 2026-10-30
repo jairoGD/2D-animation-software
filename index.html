@@ -7,7 +7,7 @@
   <title>Illustra — Illustration Software</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=16" />
+  <link rel="stylesheet" href="style.css?v=17" />
 </head>
 
 <body>
@@ -161,9 +161,6 @@
               <button class="dropdown-item" id="menu-canvas-size">Canvas Size</button>
               <button class="dropdown-item" id="menu-auto-adjust">Auto Adjust Canvas size <span class="menu-shortcut">Alt+A</span></button>
               <div class="dropdown-separator"></div>
-              <button class="dropdown-item" id="menu-color-adjust">Color Adjustments</button>
-              <button class="dropdown-item" id="menu-color-ramp">Color Ramp</button>
-              <div class="dropdown-separator"></div>
               <!-- Background submenu -->
               <div class="dropdown-submenu-wrapper" id="bg-submenu-wrapper">
                 <button class="dropdown-item dropdown-submenu-trigger" id="btn-bg-submenu">
@@ -190,6 +187,17 @@
                   <label class="bg-radio-item"><input type="radio" name="bgMode" value="trans-color"> Transparency (Color)</label>
                 </div>
               </div>
+            </div>
+          </div>
+          <div class="menu-item-wrapper">
+            <button class="menu-btn" id="btn-filter">Filter</button>
+            <div class="dropdown-menu" id="menu-filter-dropdown">
+              <button class="dropdown-item" data-filter-category="color">Color</button>
+              <button class="dropdown-item" data-filter-category="tone">Tone</button>
+              <button class="dropdown-item" data-filter-category="blur-mosaic">Blur &amp; Mosaic</button>
+              <button class="dropdown-item" data-filter-category="palette">Palette</button>
+              <div class="dropdown-separator"></div>
+              <button class="dropdown-item" id="menu-color-ramp">Color Ramp</button>
             </div>
           </div>
           <div class="menu-item-wrapper">
@@ -751,11 +759,11 @@
   <!-- Color Adjustments Modal -->
   <div id="color-adjust-modal" class="mini-window hidden">
     <div class="mini-window-header" id="color-adjust-header">
-      <span>Color Adjustments</span>
+      <span id="color-adjust-title">Filter</span>
       <button class="mini-window-close" id="color-adjust-close">&times;</button>
     </div>
     <div class="mini-window-body">
-      <div class="adjust-group">
+      <div class="adjust-group" data-filter-control="hue">
         <label>Hue</label>
         <div class="adjust-control">
           <input type="range" id="adjust-hue" min="-180" max="180" value="0" />
@@ -763,7 +771,7 @@
         </div>
       </div>
       
-      <div class="adjust-group">
+      <div class="adjust-group" data-filter-control="saturation">
         <label>Saturation</label>
         <div class="adjust-control">
           <input type="range" id="adjust-saturation" min="0" max="200" value="100" />
@@ -771,7 +779,7 @@
         </div>
       </div>
 
-      <div class="adjust-group">
+      <div class="adjust-group" data-filter-control="luminance">
         <label>Luminance</label>
         <div class="adjust-control">
           <input type="range" id="adjust-luminance" min="-100" max="100" value="0" />
@@ -779,7 +787,7 @@
         </div>
       </div>
 
-      <div class="adjust-group">
+      <div class="adjust-group" data-filter-control="brightness">
         <label>Brightness</label>
         <div class="adjust-control">
           <input type="range" id="adjust-brightness" min="0" max="200" value="100" />
@@ -787,7 +795,7 @@
         </div>
       </div>
 
-      <div class="adjust-group">
+      <div class="adjust-group" data-filter-control="contrast">
         <label>Contrast</label>
         <div class="adjust-control">
           <input type="range" id="adjust-contrast" min="0" max="200" value="100" />
@@ -795,7 +803,7 @@
         </div>
       </div>
 
-      <div class="adjust-group">
+      <div class="adjust-group" data-filter-control="depth">
         <label>Depth / Blur</label>
         <div class="adjust-control">
           <input type="range" id="adjust-depth" min="0" max="20" value="0" step="0.5" />
@@ -803,7 +811,7 @@
         </div>
       </div>
 
-      <div class="adjust-group">
+      <div class="adjust-group" data-filter-control="posterize">
         <label>Posterize (Color Depth)</label>
         <div class="adjust-control">
           <input type="range" id="adjust-posterize" min="2" max="256" value="256" />
@@ -811,7 +819,7 @@
         </div>
       </div>
 
-      <div class="adjust-group">
+      <div class="adjust-group" data-filter-control="color-count">
         <label for="adjust-color-count">Number of Colors</label>
         <div class="adjust-control">
           <input type="range" id="adjust-color-count" min="0" max="8" value="0" step="1" />
@@ -819,7 +827,7 @@
         </div>
       </div>
 
-      <div class="adjust-group">
+      <div class="adjust-group" data-filter-control="mosaic">
         <label>Mosaic Blur</label>
         <div class="adjust-control">
           <input type="range" id="adjust-mosaic" min="1" max="100" value="1" />
@@ -834,7 +842,7 @@
         </label>
       </div>
 
-      <div class="adjust-group-row" style="margin-top: 2px;">
+      <div class="adjust-group-row" data-filter-control="invert" style="margin-top: 2px;">
         <label class="adjust-checkbox-label">
           <input type="checkbox" id="adjust-invert" />
           <span>Invert Colors</span>
@@ -919,7 +927,7 @@
   <script src="videoManager.js?v=3"></script>
   <script src="projectManager.js?v=6"></script>
   <script src="exportManager.js?v=4"></script>
-  <script src="app.js?v=75"></script>
+  <script src="app.js?v=77"></script>
 </body>
 
 </html>

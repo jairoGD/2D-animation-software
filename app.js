@@ -659,7 +659,7 @@ function compositeAll() {
               applyLUTToCanvas(filtered, state.colorRampPreview.lut);
               source = filtered;
             } else if (state.colorAdjustPreview) {
-              source = renderColorAdjustment(source, { ...state.colorAdjustPreview, previewCache: null });
+              source = renderColorAdjustment(source, { ...state.colorAdjustPreview, previewCache: null }, state.lassoMaskCanvas);
             }
             const warped = renderFreeWarp(source, isAntiAliasingEnabled());
             if (warped) displayCtx.drawImage(warped.canvas, warped.x, warped.y);
@@ -691,7 +691,7 @@ function compositeAll() {
           } else if (state.colorAdjustPreview) {
             const filterCanvas = renderColorAdjustment(state.lassoSelectionCanvas, {
               ...state.colorAdjustPreview, previewCache: null
-            });
+            }, state.lassoMaskCanvas);
             const filterCtx = filterCanvas.getContext('2d');
 
             if (state.lassoMaskCanvas) {
@@ -6670,12 +6670,19 @@ document.getElementById('modal-overlay').addEventListener('click', e => {
 // Arquivo dropdown
 const btnNew = document.getElementById('btn-new');
 const menuArquivo = document.getElementById('menu-arquivo-dropdown');
+const btnFilter = document.getElementById('btn-filter');
+const menuFilter = document.getElementById('menu-filter-dropdown');
 const btnView = document.getElementById('btn-view');
 const menuView = document.getElementById('menu-view-dropdown');
+
+function closeFilterMenu() {
+  menuFilter.classList.remove('show');
+}
 
 btnNew.addEventListener('click', (e) => {
   e.stopPropagation();
   menuArquivo.classList.toggle('show');
+  closeFilterMenu();
   menuEditar.classList.remove('show');
   menuSelect.classList.remove('show');
   menuView.classList.remove('show');
@@ -6698,6 +6705,17 @@ btnEdit.addEventListener('click', (e) => {
   }
   menuEditar.classList.toggle('show');
   menuArquivo.classList.remove('show');
+  closeFilterMenu();
+  menuSelect.classList.remove('show');
+  menuView.classList.remove('show');
+});
+
+btnFilter.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (menuFilter.classList.contains('show')) closeFilterMenu();
+  else menuFilter.classList.add('show');
+  menuArquivo.classList.remove('show');
+  menuEditar.classList.remove('show');
   menuSelect.classList.remove('show');
   menuView.classList.remove('show');
 });
@@ -6743,6 +6761,7 @@ btnSelect.addEventListener('click', (e) => {
   menuSelect.classList.toggle('show');
   menuArquivo.classList.remove('show');
   menuEditar.classList.remove('show');
+  closeFilterMenu();
   menuView.classList.remove('show');
   
   // Update enabled/disabled status of Select More & Select Less
@@ -6767,6 +6786,7 @@ btnView.addEventListener('click', (e) => {
   menuView.classList.toggle('show');
   menuArquivo.classList.remove('show');
   menuEditar.classList.remove('show');
+  closeFilterMenu();
   menuSelect.classList.remove('show');
 });
 
@@ -6883,6 +6903,7 @@ selectModifyAmount.addEventListener('keydown', e => {
 document.addEventListener('click', () => {
   menuArquivo.classList.remove('show');
   menuEditar.classList.remove('show');
+  closeFilterMenu();
   menuSelect.classList.remove('show');
   menuView.classList.remove('show');
 });
@@ -7723,7 +7744,7 @@ function reduceCanvasColors(canvas, maxColors) {
   ctx.putImageData(image, 0, 0);
 }
 
-function renderColorAdjustment(sourceCanvas, settings) {
+function renderColorAdjustment(sourceCanvas, settings, selectionMaskCanvas = null) {
   if (settings.previewCache?.has(sourceCanvas)) return settings.previewCache.get(sourceCanvas);
   const result = document.createElement('canvas');
   result.width = sourceCanvas.width;
@@ -7732,6 +7753,17 @@ function renderColorAdjustment(sourceCanvas, settings) {
   ctx.filter = settings.filterString;
   ctx.drawImage(sourceCanvas, 0, 0);
   ctx.filter = 'none';
+
+  if (selectionMaskCanvas && settings.depth > 0) {
+    const width = result.width;
+    const height = result.height;
+    const maskPixels = selectionMaskCanvas.getContext('2d').getImageData(0, 0, width, height).data;
+    const selected = new Uint8Array(width * height);
+    for (let i = 0; i < selected.length; i++) selected[i] = maskPixels[i * 4 + 3] > 128 ? 1 : 0;
+    const image = ctx.getImageData(0, 0, width, height);
+    gaussianBlurImageData(image, width, height, settings.depth, null, selected);
+    ctx.putImageData(image, 0, 0);
+  }
 
   if (settings.mosaic > 1) {
     const tiny = document.createElement('canvas');
@@ -7751,9 +7783,15 @@ function renderColorAdjustment(sourceCanvas, settings) {
 }
 
 const colorAdjustModal = document.getElementById('color-adjust-modal');
-const menuColorAdjust = document.getElementById('menu-color-adjust');
+const filterCategoryButtons = document.querySelectorAll('[data-filter-category]');
+const filterCategoryControls = {
+  color: ['hue', 'saturation', 'invert'],
+  tone: ['luminance', 'brightness', 'contrast'],
+  'blur-mosaic': ['depth', 'mosaic'],
+  palette: ['posterize', 'color-count']
+};
 
-if (menuColorAdjust && colorAdjustModal) {
+if (filterCategoryButtons.length && colorAdjustModal) {
   let layersBackup = null;
   let lassoBackup = null;
 
@@ -7856,7 +7894,8 @@ if (menuColorAdjust && colorAdjustModal) {
       mosaic,
       invert,
       allLayers,
-      filterString: getFilterString(hue, sat, bright, contrast, depth, invert),
+      // Selection blur is applied with its binary mask after the canvas filters.
+      filterString: getFilterString(hue, sat, bright, contrast, state.lassoActive ? 0 : depth, invert),
       previewCache: new WeakMap()
     };
 
@@ -7929,9 +7968,14 @@ if (menuColorAdjust && colorAdjustModal) {
   document.getElementById('adjust-invert').addEventListener('change', applyPreview);
   document.getElementById('adjust-all-layers').addEventListener('change', applyPreview);
 
-  // Show Modal
-  menuColorAdjust.addEventListener('click', () => {
-    document.getElementById('menu-editar-dropdown').classList.remove('show');
+  // Each category opens one panel containing its related controls.
+  filterCategoryButtons.forEach(button => button.addEventListener('click', () => {
+    closeFilterMenu();
+    const controls = filterCategoryControls[button.dataset.filterCategory];
+    document.getElementById('color-adjust-title').textContent = button.textContent.trim();
+    colorAdjustModal.querySelectorAll('[data-filter-control]').forEach(control => {
+      control.hidden = !controls.includes(control.dataset.filterControl);
+    });
     
     // Backup current state before opening so we can cleanly revert on cancel
     layersBackup = snapshotLayers();
@@ -7954,7 +7998,7 @@ if (menuColorAdjust && colorAdjustModal) {
 
     // If selection is active but not floating, extract it now to allow selective previewing
     if (state.lassoActive && !state.lassoSelectionCanvas) {
-      extractLassoSelection();
+      extractLassoSelection(null, true);
     }
 
     resetAdjustSliders();
@@ -7974,7 +8018,7 @@ if (menuColorAdjust && colorAdjustModal) {
     
     colorAdjustModal.classList.remove('hidden');
     applyPreview();
-  });
+  }));
 
   // Cancel action
   function cancelAdjustments() {
@@ -8025,7 +8069,7 @@ if (menuColorAdjust && colorAdjustModal) {
 
     // If selection is active, bake the adjustment directly into the floating selection canvas
     if (state.lassoActive && state.lassoSelectionCanvas) {
-      const tempCanvas = renderColorAdjustment(state.lassoSelectionCanvas, state.colorAdjustPreview);
+      const tempCanvas = renderColorAdjustment(state.lassoSelectionCanvas, state.colorAdjustPreview, state.lassoMaskCanvas);
       const tempCtx = tempCanvas.getContext('2d');
 
       if (state.lassoMaskCanvas) {
@@ -8066,6 +8110,9 @@ if (menuColorAdjust && colorAdjustModal) {
     colorAdjustModal.classList.add('hidden');
     state.colorAdjustPreview = null;
     updateSVGFilter(0, 256); // reset active filter
+    if (lassoBackup?.active && !lassoBackup.selectionCanvas && state.lassoSelectionCanvas) {
+      bakeFloatingSelectionOnly();
+    }
     compositeAll();
   });
 }
@@ -8858,7 +8905,7 @@ state.colorRampPreview = null;
 
   // Open Dialog
   menuColorRamp.addEventListener('click', () => {
-    document.getElementById('menu-editar-dropdown').classList.remove('show');
+    closeFilterMenu();
     
     // Snapshot state
     layersBackup = snapshotLayers();
@@ -8880,7 +8927,7 @@ state.colorRampPreview = null;
     };
 
     if (state.lassoActive && !state.lassoSelectionCanvas) {
-      extractLassoSelection();
+      extractLassoSelection(null, true);
     }
 
     // Disable All Layers checkbox if selection is active
@@ -8969,6 +9016,9 @@ state.colorRampPreview = null;
 
     colorRampModal.classList.add('hidden');
     state.colorRampPreview = null;
+    if (lassoBackup?.active && !lassoBackup.selectionCanvas && state.lassoSelectionCanvas) {
+      bakeFloatingSelectionOnly();
+    }
     compositeAll();
   });
 })();

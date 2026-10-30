@@ -812,6 +812,13 @@ body { font-family: var(--font); color: var(--text-primary); }
 .dropdown-submenu-wrapper.open .dropdown-submenu {
   display: block;
 }
+#menu-filter-dropdown > .dropdown-item {
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+#menu-filter-dropdown > .dropdown-item + .dropdown-item {
+  border-top: 1px solid var(--border);
+}
 .bg-radio-item {
   display: flex;
   align-items: center;
@@ -1751,6 +1758,9 @@ body { font-family: var(--font); color: var(--text-primary); }
   display: flex;
   align-items: center;
   margin: 4px 0;
+}
+#color-adjust-modal [data-filter-control][hidden] {
+  display: none;
 }
 .adjust-checkbox-label {
   display: flex;
