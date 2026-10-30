@@ -27,6 +27,9 @@ const state = {
   brushTipCanvas: null,
   brushTipImageData: null,
   brushTipDirty: true,
+  paintTiles: null,
+  paintCoverageWidth: 0,
+  paintCoverageHeight: 0,
   eraserOriginalPixels: null,
   eraserCoverage: null,
   eraserCoverageWidth: 0,
@@ -2931,28 +2934,109 @@ function gaussianBlurImageData(imgData, width, height, sigma, reusableScratch = 
 }
 
 function brushMask(dx, dy, radius, hardness) {
-  const d = Math.sqrt(dx * dx + dy * dy);
-  const t = d / radius;
-
-  if (t >= 1) return 0;
-
+  if (radius <= 0) return 0;
+  const distance = Math.hypot(dx, dy);
   hardness = Math.max(0, Math.min(1, hardness));
-
   const aaCheckbox = document.getElementById('anti-alias-toggle');
   const antiAlias = aaCheckbox ? aaCheckbox.checked : true;
 
-  if (antiAlias) {
-    const minFeatherWidth = radius > 0 ? (1.0 / radius) : 1.0;
-    const maxHardness = Math.max(0, 1.0 - minFeatherWidth);
-    hardness = Math.min(hardness, maxHardness);
+  if (hardness >= 1) {
+    return antiAlias ? Math.max(0, Math.min(1, radius + 0.5 - distance)) : Number(distance < radius);
   }
 
-  if (t <= hardness) return 1;
+  // A low hardness has a narrow opaque center and a Gaussian-like falloff.
+  // Squaring hardness spreads the useful soft range across the slider.
+  const core = hardness * hardness * Math.max(0, radius - (antiAlias ? 0.5 : 0));
+  if (distance <= core) return 1;
+  if (distance >= radius) return 0;
+  const t = (distance - core) / (radius - core);
+  // Very small tips need a broader profile or their few pixels disappear.
+  const sharpness = (8 - 3 * hardness) * Math.min(1, Math.max(0.25, radius / 4));
+  const edgeValue = Math.exp(-sharpness);
+  return Math.max(0, (Math.exp(-sharpness * t * t) - edgeValue) / (1 - edgeValue));
+}
 
-  const feather = (t - hardness) / (1 - hardness);
+function beginPaintStroke(ctx) {
+  state.paintTiles = new Map();
+  state.paintCoverageWidth = ctx.canvas.width;
+  state.paintCoverageHeight = ctx.canvas.height;
+}
 
-  // Smooth transition across the brush's soft edge.
-  return 1 - feather * feather * (3 - 2 * feather);
+function clearPaintStroke() {
+  state.paintTiles = null;
+  state.paintCoverageWidth = 0;
+  state.paintCoverageHeight = 0;
+}
+
+function drawPaintStamp(ctx, cx, cy, brushCanvas) {
+  if (!state.paintTiles ||
+      (state.lassoActive && !state.selectionMask)) return false;
+
+  const tipWidth = brushCanvas.width;
+  const tipHeight = brushCanvas.height;
+  const startX = Math.round(cx - tipWidth / 2);
+  const startY = Math.round(cy - tipHeight / 2);
+  const minX = Math.max(0, startX);
+  const minY = Math.max(0, startY);
+  const maxX = Math.min(state.paintCoverageWidth, startX + tipWidth);
+  const maxY = Math.min(state.paintCoverageHeight, startY + tipHeight);
+  if (minX >= maxX || minY >= maxY) return true;
+
+  const tip = state.brushTipImageData || brushCanvas.getContext('2d').getImageData(0, 0, tipWidth, tipHeight);
+  const output = ctx.getImageData(minX, minY, maxX - minX, maxY - minY);
+  const opacity = Math.max(0, Math.min(1, state.opacity ?? 1));
+  const tileSize = 64;
+
+  for (let tileY = Math.floor(minY / tileSize); tileY <= Math.floor((maxY - 1) / tileSize); tileY++) {
+    for (let tileX = Math.floor(minX / tileSize); tileX <= Math.floor((maxX - 1) / tileSize); tileX++) {
+      const tileLeft = tileX * tileSize;
+      const tileTop = tileY * tileSize;
+      const tileWidth = Math.min(tileSize, state.paintCoverageWidth - tileLeft);
+      const tileHeight = Math.min(tileSize, state.paintCoverageHeight - tileTop);
+      const key = tileY * Math.ceil(state.paintCoverageWidth / tileSize) + tileX;
+      let tile = state.paintTiles.get(key);
+      if (!tile) {
+        tile = {
+          original: ctx.getImageData(tileLeft, tileTop, tileWidth, tileHeight).data,
+          coverage: new Uint8ClampedArray(tileWidth * tileHeight)
+        };
+        state.paintTiles.set(key, tile);
+      }
+
+      for (let y = Math.max(minY, tileTop); y < Math.min(maxY, tileTop + tileHeight); y++) {
+        for (let x = Math.max(minX, tileLeft); x < Math.min(maxX, tileLeft + tileWidth); x++) {
+          const pixel = x + y * state.paintCoverageWidth;
+          if (state.lassoActive && state.selectionMask[pixel] !== 1) continue;
+          const tipIndex = ((x - startX) + (y - startY) * tipWidth) * 4;
+          const tilePixel = (x - tileLeft) + (y - tileTop) * tileWidth;
+          const coverage = tip.data[tipIndex + 3];
+          if (coverage <= tile.coverage[tilePixel]) continue;
+          tile.coverage[tilePixel] = coverage;
+
+          const paintAlpha = coverage / 255 * opacity;
+          const sourceIndex = tilePixel * 4;
+          const originalAlpha = tile.original[sourceIndex + 3] / 255;
+          const keptAlpha = originalAlpha * (1 - paintAlpha);
+          const resultAlpha = paintAlpha + keptAlpha;
+          const outputIndex = ((x - minX) + (y - minY) * (maxX - minX)) * 4;
+
+          if (resultAlpha > 0) {
+            for (let channel = 0; channel < 3; channel++) {
+              output.data[outputIndex + channel] =
+                (tip.data[tipIndex + channel] * paintAlpha +
+                 tile.original[sourceIndex + channel] * keptAlpha) / resultAlpha;
+            }
+          } else {
+            output.data[outputIndex] = output.data[outputIndex + 1] = output.data[outputIndex + 2] = 0;
+          }
+          output.data[outputIndex + 3] = resultAlpha * 255;
+        }
+      }
+    }
+  }
+
+  ctx.putImageData(output, minX, minY);
+  return true;
 }
 
 function beginEraserStroke(ctx) {
@@ -3115,6 +3199,8 @@ function drawBrushStamp(ctx, cx, cy, radius, size, brushCanvas) {
 
     ctx.putImageData(imgData, capX, capY);
   } else if (state.tool === 'eraser' && drawEraserStamp(ctx, cx, cy, brushCanvas)) {
+    return;
+  } else if (state.tool === 'brush' && drawPaintStamp(ctx, cx, cy, brushCanvas)) {
     return;
   } else {
     ctx.drawImage(brushCanvas, rx, ry);
@@ -3293,9 +3379,12 @@ function startStroke(x, y) {
   state.strokeLctx = lctx;
   configCtx(lctx, state.tool);
   clearEraserStroke();
+  clearPaintStroke();
 
   if (state.tool === 'eraser' && !isAliased1px()) {
     beginEraserStroke(lctx);
+  } else if (state.tool === 'brush' && !state.isAltDrawing && !isAliased1px()) {
+    beginPaintStroke(lctx);
   }
 
   if (isAliased1px()) {
@@ -4903,8 +4992,9 @@ container.addEventListener('pointerdown', e => {
   state.clickStartY = y;
   state.clickStartTime = Date.now();
 
-  // Click outside canvas handling (discard selection if left click outside white page)
-  if (state.lassoActive && !state.lassoTransformMode && !state.lassoFreeQuad &&
+  // Only selection tools use an outside click to dismiss a selection.
+  if ((state.tool === 'lasso' || state.tool === 'magicwand') &&
+      state.lassoActive && !state.lassoTransformMode && !state.lassoFreeQuad &&
       (x < 0 || x >= canvasW || y < 0 || y >= canvasH)) {
     if (!state.spaceDown && e.button === 0) {
       discardLassoSelection(); // bakes floating pixels back first
@@ -5109,6 +5199,13 @@ container.addEventListener('pointerdown', e => {
       beginEraserStroke(lctx);
       drawSoftBrushStroke(lctx, state.shiftAnchor.x, state.shiftAnchor.y, x, y);
       clearEraserStroke();
+    } else if (state.tool === 'brush') {
+      if (!state.isAltDrawing) {
+        ensureBrushTip();
+        beginPaintStroke(lctx);
+      }
+      drawSoftBrushStroke(lctx, state.shiftAnchor.x, state.shiftAnchor.y, x, y);
+      clearPaintStroke();
     } else {
       lctx.beginPath();
       lctx.moveTo(state.shiftAnchor.x, state.shiftAnchor.y);
@@ -5391,7 +5488,8 @@ container.addEventListener('pointerup', e => {
 
   const {x, y} = clientToCanvas(e.clientX, e.clientY);
   
-  if (state.lassoActive && !state.lassoFreeDrag) {
+  if ((state.tool === 'lasso' || state.tool === 'magicwand') &&
+      state.lassoActive && !state.lassoFreeDrag) {
     const isQuickClick = (Date.now() - state.clickStartTime < 300) && 
                          Math.hypot(x - state.clickStartX, y - state.clickStartY) < 3;
     if (isQuickClick) {
@@ -5399,6 +5497,12 @@ container.addEventListener('pointerup', e => {
       const isInside = state.selectionMask && state.selectionMask[pixelIdx] === 1;
       
       if (x < 0 || x >= canvasW || y < 0 || y >= canvasH || !isInside) {
+        if (state.strokeLctx) {
+          state.strokeLctx.restore();
+          state.strokeLctx = null;
+        }
+        clearEraserStroke();
+        clearPaintStroke();
         discardLassoSelection(); // bakes floating pixels back first
         compositeAll();
         saveHistory();
@@ -5416,6 +5520,7 @@ container.addEventListener('pointerup', e => {
     state.strokeLctx = null;
   }
   clearEraserStroke();
+  clearPaintStroke();
 
   // ── Lasso and Magic Wand pointerup ───────────────────────────────
   if (state.tool === 'lasso' || state.tool === 'magicwand') {
@@ -5490,6 +5595,7 @@ container.addEventListener('pointerleave', e => {
       state.strokeLctx = null;
     }
     clearEraserStroke();
+    clearPaintStroke();
 
     // Lasso: if path has enough points, close and extract selection on canvas exit
     if (state.tool === 'lasso') {
