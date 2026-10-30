@@ -23,6 +23,7 @@ const state = {
   brushBlurStrength: 0.25,
   blurScratchPixels: null,
   blurOriginalPixels: null,
+  blurSelectionMask: null,
   brushTipCanvas: null,
   brushTipImageData: null,
   brushTipDirty: true,
@@ -2824,9 +2825,59 @@ function boxBlurVertical(source, target, width, height, topRadius, bottomRadius)
   }
 }
 
+// Normalize each blur window by the selected pixels it contains. Pixels
+// outside the selection must not contribute color, alpha, or a dark fringe.
+function boxBlurSelected(source, target, width, height, before, after, horizontal, mask) {
+  const lines = horizontal ? height : width;
+  const length = horizontal ? width : height;
+  const stride = horizontal ? 1 : width;
+
+  for (let line = 0; line < lines; line++) {
+    const start = horizontal ? line * width : line;
+    let sumR = 0, sumG = 0, sumB = 0, sumA = 0, count = 0;
+
+    for (let offset = -before; offset <= after; offset++) {
+      const pixel = start + Math.max(0, Math.min(length - 1, offset)) * stride;
+      if (!mask[pixel]) continue;
+      const index = pixel * 4;
+      sumR += source[index];
+      sumG += source[index + 1];
+      sumB += source[index + 2];
+      sumA += source[index + 3];
+      count++;
+    }
+
+    for (let position = 0; position < length; position++) {
+      const pixel = start + position * stride;
+      const index = pixel * 4;
+      if (mask[pixel] && count > 0) {
+        target[index] = Math.round(sumR / count);
+        target[index + 1] = Math.round(sumG / count);
+        target[index + 2] = Math.round(sumB / count);
+        target[index + 3] = Math.round(sumA / count);
+      } else {
+        target[index] = target[index + 1] = target[index + 2] = target[index + 3] = 0;
+      }
+
+      const removed = start + Math.max(0, Math.min(length - 1, position - before)) * stride;
+      const added = start + Math.max(0, Math.min(length - 1, position + after + 1)) * stride;
+      if (mask[removed]) {
+        const i = removed * 4;
+        sumR -= source[i]; sumG -= source[i + 1]; sumB -= source[i + 2]; sumA -= source[i + 3];
+        count--;
+      }
+      if (mask[added]) {
+        const i = added * 4;
+        sumR += source[i]; sumG += source[i + 1]; sumB += source[i + 2]; sumA += source[i + 3];
+        count++;
+      }
+    }
+  }
+}
+
 // Three separable box passes approximate a Gaussian kernel to within roughly
 // 3%, as recommended by the W3C SVG filter specification for sigma >= 2.
-function gaussianBlurImageData(imgData, width, height, sigma, reusableScratch = null) {
+function gaussianBlurImageData(imgData, width, height, sigma, reusableScratch = null, selectionMask = null) {
   if (width < 1 || height < 1 || sigma <= 0) return;
 
   const pixels = imgData.data;
@@ -2856,8 +2907,13 @@ function gaussianBlurImageData(imgData, width, height, sigma, reusableScratch = 
       ];
 
   for (const pass of passes) {
-    boxBlurHorizontal(pixels, scratch, width, height, pass.before, pass.after);
-    boxBlurVertical(scratch, pixels, width, height, pass.before, pass.after);
+    if (selectionMask) {
+      boxBlurSelected(pixels, scratch, width, height, pass.before, pass.after, true, selectionMask);
+      boxBlurSelected(scratch, pixels, width, height, pass.before, pass.after, false, selectionMask);
+    } else {
+      boxBlurHorizontal(pixels, scratch, width, height, pass.before, pass.after);
+      boxBlurVertical(scratch, pixels, width, height, pass.before, pass.after);
+    }
   }
 
   for (let index = 0; index < pixels.length; index += 4) {
@@ -2998,7 +3054,20 @@ function drawBrushStamp(ctx, cx, cy, radius, size, brushCanvas) {
     const originalData = state.blurOriginalPixels;
     originalData.set(imgData.data);
 
-    gaussianBlurImageData(imgData, capturedWidth, capturedHeight, blurRadius, state.blurScratchPixels);
+    let blurSelectionMask = null;
+    if (state.lassoActive && state.selectionMask) {
+      const pixelCount = capturedWidth * capturedHeight;
+      if (!state.blurSelectionMask || state.blurSelectionMask.length !== pixelCount) {
+        state.blurSelectionMask = new Uint8Array(pixelCount);
+      }
+      blurSelectionMask = state.blurSelectionMask;
+      for (let y = 0; y < capturedHeight; y++) {
+        const canvasRow = (capY + y) * canvasWidth + capX;
+        blurSelectionMask.set(state.selectionMask.subarray(canvasRow, canvasRow + capturedWidth), y * capturedWidth);
+      }
+    }
+
+    gaussianBlurImageData(imgData, capturedWidth, capturedHeight, blurRadius, state.blurScratchPixels, blurSelectionMask);
     const blurredData = imgData.data;
 
     const strength = (state.brushBlurStrength !== undefined ? state.brushBlurStrength : 0.25) * (state.opacity !== undefined ? state.opacity : 1.0);
@@ -3010,9 +3079,7 @@ function drawBrushStamp(ctx, cx, cy, radius, size, brushCanvas) {
         const py = capY + y;
 
         let isSelected = true;
-        if (state.lassoActive && state.selectionMask) {
-          isSelected = state.selectionMask[px + py * canvasWidth] === 1;
-        }
+        if (blurSelectionMask) isSelected = blurSelectionMask[x + y * capturedWidth] === 1;
 
         let amount = 0;
         if (isSelected) {
@@ -3024,10 +3091,19 @@ function drawBrushStamp(ctx, cx, cy, radius, size, brushCanvas) {
 
         const idx = (x + y * capturedWidth) * 4;
         if (amount > 0) {
-          blurredData[idx]   = originalData[idx]   * (1 - amount) + blurredData[idx]   * amount;
-          blurredData[idx+1] = originalData[idx+1] * (1 - amount) + blurredData[idx+1] * amount;
-          blurredData[idx+2] = originalData[idx+2] * (1 - amount) + blurredData[idx+2] * amount;
-          blurredData[idx+3] = originalData[idx+3] * (1 - amount) + blurredData[idx+3] * amount;
+          const originalAlpha = originalData[idx + 3] / 255;
+          const blurredAlpha = blurredData[idx + 3] / 255;
+          const keptAlpha = originalAlpha * (1 - amount);
+          const mixedAlpha = blurredAlpha * amount;
+          const resultAlpha = keptAlpha + mixedAlpha;
+          if (resultAlpha > 0) {
+            blurredData[idx] = (originalData[idx] * keptAlpha + blurredData[idx] * mixedAlpha) / resultAlpha;
+            blurredData[idx + 1] = (originalData[idx + 1] * keptAlpha + blurredData[idx + 1] * mixedAlpha) / resultAlpha;
+            blurredData[idx + 2] = (originalData[idx + 2] * keptAlpha + blurredData[idx + 2] * mixedAlpha) / resultAlpha;
+          } else {
+            blurredData[idx] = blurredData[idx + 1] = blurredData[idx + 2] = 0;
+          }
+          blurredData[idx + 3] = resultAlpha * 255;
         } else {
           blurredData[idx]   = originalData[idx];
           blurredData[idx+1] = originalData[idx+1];
@@ -4122,6 +4198,13 @@ function getExistingSelectionMask() {
   const mask = new Uint8Array(canvasW * canvasH);
   if (!state.lassoActive || !state.lassoMaskCanvas || !state.lassoBoundingBox) return mask;
 
+  // An unchanged stencil already has exact pixel coordinates. Drawing it into
+  // another canvas can resample its edges and shift pixels on repeated inversions.
+  if (state.selectionMask?.length === mask.length && !selectionNeedsResampling() &&
+      !(state.lassoCurrentOffset.x || 0) && !(state.lassoCurrentOffset.y || 0)) {
+    return new Uint8Array(state.selectionMask);
+  }
+
   if (state.lassoFreeQuad) {
     const warped = renderFreeWarp(state.lassoMaskCanvas, false);
     if (!warped) return mask;
@@ -4191,7 +4274,7 @@ function invertSelection() {
     invertedMask[i] = existingMask[i] === 1 ? 0 : 1;
   }
 
-  const newPaths = traceMaskContours(invertedMask);
+  const newPaths = tracePixelMaskEdges(invertedMask, canvasW, canvasH);
   
   if (newPaths.length > 0) {
     state.lassoPaths = newPaths;
@@ -5504,6 +5587,14 @@ document.addEventListener('keydown', e => {
     document.getElementById('tool-shapes').focus();
     return;
   }
+  // Keep Ctrl/Meta from changing tools while editing a field, and let the
+  // browser select that field's value instead of the canvas on Ctrl/Meta+A.
+  const isTextField = e.target.matches?.('textarea, input:not([type]), input[type="text"], input[type="number"], input[type="search"], input[type="email"], input[type="url"], input[type="tel"], input[type="password"]');
+  if (isTextField && (
+    e.key === 'Control' || e.key === 'Meta' ||
+    ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a')
+  )) return;
+
   // Block single-key shortcuts when typing in an input,
   // but ALWAYS allow Ctrl/Meta combos (undo, redo, new canvas, etc.)
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName) && !e.ctrlKey && !e.metaKey) return;
