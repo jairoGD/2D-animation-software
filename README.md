@@ -3,6 +3,8 @@ A lightweight 2D drawing and animation tool made for creating hand-drawn animati
 
 https://jairogd.github.io/2D-animation-software/
 
+<img width="1912" height="902" alt="image" src="https://github.com/user-attachments/assets/4258a268-c93e-4bf2-9700-d5a120a5ba26" />
+
 ## Features
 
 * 2D drawing and painting tools
